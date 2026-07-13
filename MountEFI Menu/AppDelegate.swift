@@ -3,7 +3,7 @@ import Foundation
 import UserNotifications
 
 @main
-class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemValidation {
 
     // Элементы интерфейса статус-бара
     var statusItem: NSStatusItem!
@@ -12,17 +12,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // Переменные состояния
     var menuIsOpen = false
     var lastDisksCount = 0
-    var knownDiskIds: Set<String> = [] // Хранит ID для отслеживания физического подключения USB
-    var needsRefresh = true           // Флаг запроса на пересборку меню из фонового потока
+    var knownDiskIds: Set<String> = [] // Хранит ID для отслеживания физического подключения дисков
+    var needsRefresh = false           // Флаг запроса на пересборку меню из фонового потока
     var activeDiskItems: [String: NSMenuItem] = [:]
     
     // Путь к файлу пароля
     let confPath = (NSHomeDirectory() as NSString).appendingPathComponent(".MountEFImenu.plist")
 
+    // ДОБАВЛЕНО: Новый флаг isThunderbolt в структуру диска
     struct EfiDisk {
         let id: String
         let physName: String
         let isUsb: Bool
+        let isThunderbolt: Bool
         let isMounted: Bool
         let size: String
         let type: String
@@ -33,14 +35,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         
         if let button = statusItem.button {
-            if let customIcon = NSImage(named: "Image") {
-                customIcon.isTemplate = false
-                customIcon.size = NSSize(width: 18, height: 18) // Фиксируем логический размер
+            if let resourcePath = Bundle.main.path(forResource: "MenuLogo", ofType: "png"),
+               let customIcon = NSImage(contentsOfFile: resourcePath) {
+                customIcon.isTemplate = false // Автоматический Dark Mode
+                customIcon.size = NSSize(width: 18, height: 18)
                 button.image = customIcon
             } else {
                 button.title = "💾"
             }
-        
+            
             UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
                 if let error = error {
                     print("Ошибка запроса прав на уведомления: \(error)")
@@ -59,7 +62,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.updateMenuOnMainThread(with: initialDisks)
         }
         
-        // Запускаем таймер проверки USB-портов (интервал 3 секунды)
+        // Запускаем таймер проверки портов (интервал 3 секунды)
         Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             self?.asyncHotplugMonitor()
         }
@@ -81,7 +84,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menuIsOpen = false
     }
 
-    // Вспомогательный метод отправки нотификаций (замена старому методу)
     func showNotification(title: String, text: String) {
         let content = UNMutableNotificationContent()
         content.title = title
@@ -114,9 +116,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var efiData: [EfiDisk] = []
         if partitions.isEmpty { return [] }
         
-        var driveCache: [String: (name: String, isUsb: Bool)] = [:]
-        
-        // Получаем полный список смонтированных устройств одним вызовом
+        // КЭШ ИСПРАВЛЕН: Добавлен булев флаг для Thunderbolt накопителей
+        var driveCache: [String: (name: String, isUsb: Bool, isThunderbolt: Bool)] = [:]
         let mountOutput = runShell("/sbin/mount")
         
         for part in partitions {
@@ -126,34 +127,43 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let parentDisk = match != nil ? nsPart.substring(with: match!.range(at: 1)) : "disk0"
             
             if driveCache[parentDisk] == nil {
-                let busTask = Process()
-                busTask.launchPath = "/bin/bash"
-                busTask.arguments = ["-c", "/usr/sbin/diskutil info \(parentDisk) | grep 'Protocol'"]
-                let busPipe = Pipe()
-                busTask.standardOutput = busPipe
-                busTask.launch()
-                busTask.waitUntilExit()
-                let busOutput = String(data: busPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                let isUsb = busOutput.contains("USB")
+                let infoTask = Process()
+                infoTask.launchPath = "/bin/bash"
                 
-                let nameTask = Process()
-                nameTask.launchPath = "/bin/bash"
-                nameTask.arguments = ["-c", "/usr/sbin/diskutil info \(parentDisk) | grep -E 'Device / Media Name|Media Name' | head -n 1 | cut -d: -f2 | xargs"]
-                let namePipe = Pipe()
-                nameTask.standardOutput = namePipe
-                nameTask.launch()
-                nameTask.waitUntilExit()
-                var physName = (String(data: namePipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                // ОПТИМИЗИРОВАНО: Запрашиваем протокол, локацию и медиа-имя одновременно за ОДИН вызов
+                infoTask.arguments = ["-c", "/usr/sbin/diskutil info \(parentDisk) | grep -E 'Protocol|Location|Device / Media Name|Media Name'"]
                 
-                if physName.isEmpty { physName = isUsb ? "USB Storage" : "Internal Drive" }
-                driveCache[parentDisk] = (name: physName, isUsb: isUsb)
+                let infoPipe = Pipe()
+                infoTask.standardOutput = infoPipe
+                infoTask.launch()
+                infoTask.waitUntilExit()
+                
+                let infoOutput = String(data: infoPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                
+                let isUsb = infoOutput.contains("USB")
+                let isExternal = infoOutput.contains("External")
+                let isPCIe = infoOutput.contains("PCI-Express") || infoOutput.contains("Apple Fabric")
+                let isThunderbolt = isExternal && isPCIe // Определение Thunderbolt шины
+                
+                var physName = ""
+                let lines = infoOutput.components(separatedBy: "\n")
+                if let nameLine = lines.first(where: { $0.contains("Media Name") }) {
+                    if let colonIndex = nameLine.firstIndex(of: ":") {
+                        let afterColon = nameLine[nameLine.index(after: colonIndex)...]
+                        physName = afterColon.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                }
+                
+                if physName.isEmpty {
+                    if isThunderbolt { physName = "Thunderbolt NVMe" }
+                    else { physName = isUsb ? "USB Storage" : "Internal Drive" }
+                }
+                
+                driveCache[parentDisk] = (name: physName, isUsb: isUsb, isThunderbolt: isThunderbolt)
             }
             
             let hwInfo = driveCache[parentDisk]!
-            
-            // ИСПРАВЛЕНО: Мгновенная проверка монтирования через кэшированный список mount
             let isMounted = mountOutput.contains("/dev/\(part) ")
-            
             let size = "---"
             
             var partType = part.contains("ISC") ? "ISC" : "EFI"
@@ -163,12 +173,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             
             let vName = "EFI"
             
-            efiData.append(EfiDisk(id: part, physName: hwInfo.name, isUsb: hwInfo.isUsb, isMounted: isMounted, size: size, type: partType, volumeName: vName))
+            efiData.append(EfiDisk(id: part, physName: hwInfo.name, isUsb: hwInfo.isUsb, isThunderbolt: hwInfo.isThunderbolt, isMounted: isMounted, size: size, type: partType, volumeName: vName))
         }
         return efiData
     }
 
-    // Вспомогательный метод для быстрого выполнения команд, если его не было в скопированной части
     func runShell(_ command: String) -> String {
         let task = Process()
         let pipe = Pipe()
@@ -182,24 +191,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return String(data: data, encoding: .utf8) ?? ""
     }
 
-
     @objc func asyncHotplugMonitor() {
         if menuIsOpen { return }
         
         DispatchQueue.global(qos: .userInitiated).async {
             let disks = self.getEfiDisks()
             let currentCount = disks.count
-            
-            // Проверяем, изменился ли статус монтирования хотя бы у одного диска
             var mountStatusChanged = false
             
-            // Получаем текущие состояния монтирования из активного меню
             DispatchQueue.main.sync {
                 for disk in disks {
-                    // Ищем пункт меню для текущего диска
                     if let item = self.statusMenu.items.first(where: { ($0.representedObject as? String) == disk.id }) {
                         let titleContainsGreen = item.title.contains("🟢")
-                        // Если в меню кружок зеленый, а диск по факту размонтирован (или наоборот) — взводим флаг
                         if titleContainsGreen != disk.isMounted {
                             mountStatusChanged = true
                             break
@@ -208,19 +211,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             }
             
-            // Отслеживание физического подключения новых внешних USB-дисков
             for disk in disks {
-                if disk.isUsb && !self.knownDiskIds.contains(disk.id) {
+                // Уведомление о подключении любого внешнего диска (USB или Thunderbolt)
+                if (disk.isUsb || disk.isThunderbolt) && !self.knownDiskIds.contains(disk.id) {
+                    let typeStr = disk.isThunderbolt ? "Thunderbolt" : "USB"
                     DispatchQueue.main.async {
                         self.showNotification(
                             title: "MountEFI Menu",
-                            text: "Подключен USB накопитель: Обнаружен \(disk.id) (\(disk.physName))"
+                            text: "Подключен \(typeStr) накопитель: Обнаружен \(disk.id) (\(disk.physName))"
                         )
                     }
                 }
             }
             
-            // Перерисовываем меню, если изменилось число дисков, статус монтирования или взведен флаг рефреша
             if currentCount != self.lastDisksCount || mountStatusChanged || self.needsRefresh {
                 self.lastDisksCount = currentCount
                 self.knownDiskIds = Set(disks.map { $0.id })
@@ -230,7 +233,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
     }
-
     func refreshMenu() {
         self.needsRefresh = true
         self.asyncHotplugMonitor()
@@ -247,10 +249,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 emptyItem.isEnabled = false
                 self.statusMenu.addItem(emptyItem)
             } else {
-                let internalDisks = disks.filter { !$0.isUsb }
+                // Разделяем массив дисков строго на три независимые категории
+                let internalDisks = disks.filter { !$0.isUsb && !$0.isThunderbolt }
+                let thunderboltDisks = disks.filter { $0.isThunderbolt }
                 let usbDisks = disks.filter { $0.isUsb }
                 
-                // 1. Вывод внутренних дисков
+                // 1. СЕКЦИЯ: Внутренние диски
                 if !internalDisks.isEmpty {
                     let header = NSMenuItem(title: "Внутренние диски", action: nil, keyEquivalent: "")
                     header.isEnabled = false
@@ -267,9 +271,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     }
                 }
                 
-                // 2. Вывод внешних USB-дисков
-                if !usbDisks.isEmpty {
+                // 2. СЕКЦИЯ: Внешние Thunderbolt диски (Размещена второй)
+                if !thunderboltDisks.isEmpty {
                     if !internalDisks.isEmpty {
+                        self.statusMenu.addItem(NSMenuItem.separator())
+                    }
+                    
+                    let header = NSMenuItem(title: "Внешние Thunderbolt", action: nil, keyEquivalent: "")
+                    header.isEnabled = false
+                    self.statusMenu.addItem(header)
+                    
+                    for disk in thunderboltDisks {
+                        let status = disk.isMounted ? "🟢" : "🔴"
+                        // Для Thunderbolt выводим красивую иконку молнии ⚡️
+                        let title = "\(status) ⚡️ \(disk.id) [\(disk.type)] (\(disk.physName))"
+
+                        let item = NSMenuItem(title: title, action: #selector(self.toggleMount(_:)), keyEquivalent: "")
+                        item.representedObject = disk.id
+                        item.target = self
+                        self.statusMenu.addItem(item)
+                    }
+                }
+                
+                // 3. СЕКЦИЯ: Внешние USB накопители
+                if !usbDisks.isEmpty {
+                    if !internalDisks.isEmpty || !thunderboltDisks.isEmpty {
                         self.statusMenu.addItem(NSMenuItem.separator())
                     }
                     
@@ -299,8 +325,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.statusMenu.addItem(passItem)
             
             self.statusMenu.addItem(NSMenuItem.separator())
-            
-            // ИСПРАВЛЕНО: Теперь кнопка ссылается на новый рабочий экшен
             let quitItem = NSMenuItem(title: "Выйти", action: #selector(self.forceQuitApp), keyEquivalent: "q")
             quitItem.target = self
             self.statusMenu.addItem(quitItem)
@@ -404,17 +428,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    // ==========================================
-    // ДОБАВЛЕНО: Методы принудительной активации и горячих клавиш
-    // ==========================================
-
     @objc func forceQuitApp() {
         NSApplication.shared.terminate(self)
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(forceQuitApp) {
-            return true // Делает пункт "Выйти" активным в обход ограничений агента LSUIElement
+            return true
         }
         return true
     }
@@ -428,4 +448,5 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
     }
-} // Это самая последняя фигурная скобка файла
+}
+
