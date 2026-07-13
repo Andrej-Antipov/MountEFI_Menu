@@ -372,6 +372,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
     @objc func toggleMount(_ sender: NSMenuItem) {
         guard let diskId = sender.representedObject as? String else { return }
         
+        // Уходим в фоновый режим выполнения, чтобы избежать фризов UI клавиатуры
         DispatchQueue.global(qos: .userInitiated).async {
             let disks = self.getEfiDisks()
             guard let disk = disks.first(where: { $0.id == diskId }) else { return }
@@ -379,10 +380,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             let password = self.getStoredPassword()
             let isMounted = disk.isMounted
             
-            let task = Process()
-            task.launchPath = "/bin/bash"
-            
             if isMounted {
+                // 1. Асинхронно закрываем окно Finder, если оно открыто
+                let fastCloseScript = "tell application \"Finder\" to if window \"\(disk.volumeName)\" exists then close window \"\(disk.volumeName)\""
+                let closeTask = Process()
+                closeTask.launchPath = "/usr/bin/osascript"
+                closeTask.arguments = ["-e", fastCloseScript]
+                closeTask.launch()
+                closeTask.waitUntilExit()
+                
+                // 2. Первая попытка: Стандартное размонтирование
+                let task = Process()
+                task.launchPath = "/bin/bash"
+                
                 if let pwd = password {
                     task.arguments = ["-c", "echo '\(pwd)' | sudo -S /usr/sbin/diskutil unmount \(diskId)"]
                 } else {
@@ -391,16 +401,43 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 task.launch()
                 task.waitUntilExit()
                 
-                DispatchQueue.main.async {
-                    if task.terminationStatus == 0 {
-                        self.showNotification(title: "MountEFI Menu", text: "Раздел \(diskId) успешно размонтирован")
+                var success = (task.terminationStatus == 0)
+                var forced = false
+                
+                // 3. АВТО-ПОВТОР: Если обычный unmount не сработал, принудительно используем FORCE
+                if !success {
+                    forced = true
+                    let forceTask = Process()
+                    forceTask.launchPath = "/bin/bash"
+                    
+                    if let pwd = password {
+                        forceTask.arguments = ["-c", "echo '\(pwd)' | sudo -S /usr/sbin/diskutil unmount force \(diskId)"]
                     } else {
-                        self.showNotification(title: "Ошибка", text: "Не удалось размонтировать \(diskId)")
+                        forceTask.arguments = ["-c", "osascript -e 'do shell script \"/usr/sbin/diskutil unmount force \(diskId)\" with administrator privileges'"]
+                    }
+                    forceTask.launch()
+                    forceTask.waitUntilExit()
+                    success = (forceTask.terminationStatus == 0)
+                }
+                // Обработка результатов размонтирования
+                DispatchQueue.main.async {
+                    if success {
+                        if forced {
+                            self.showNotification(title: "MountEFI Menu", text: "Раздел \(diskId) принудительно отключен с помощью Force")
+                        } else {
+                            self.showNotification(title: "MountEFI Menu", text: "Раздел \(diskId) успешно размонтирован")
+                        }
+                    } else {
+                        self.showNotification(title: "Ошибка", text: "Не удалось размонтировать \(diskId) даже принудительно")
                     }
                     self.needsRefresh = true
                     self.asyncHotplugMonitor()
                 }
             } else {
+                // 4. Логика монтирования (осталась без изменений)
+                let task = Process()
+                task.launchPath = "/bin/bash"
+                
                 if let pwd = password {
                     task.arguments = ["-c", "echo '\(pwd)' | sudo -S /usr/sbin/diskutil mount \(diskId)"]
                 } else {
