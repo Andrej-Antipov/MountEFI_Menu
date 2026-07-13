@@ -35,6 +35,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         
         if let button = statusItem.button {
+            // ДОБАВЛЕНО: Всплывающая подсказка при наведении мышки
+            button.toolTip = "MountEFI Menu"
             if let resourcePath = Bundle.main.path(forResource: "MenuLogo", ofType: "png"),
                let customIcon = NSImage(contentsOfFile: resourcePath) {
                 customIcon.isTemplate = false // Автоматический Dark Mode
