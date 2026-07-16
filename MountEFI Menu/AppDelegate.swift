@@ -2,8 +2,8 @@ import Cocoa
 import Foundation
 import UserNotifications
 
-// Модули IOKit и Darwin полностью удалены из глобальных импортов,
-// так как вся работа переведена на нативный фреймворк DiskArbitration.
+
+// вся работа переведена на нативный фреймворк DiskArbitration.
 
 class BootEFIFinder {
     static func findCurrentSystemEFI() -> String? {
@@ -200,7 +200,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 if let wholeDisk = DADiskCopyWholeDisk(disk),
                    let wholeDesc = DADiskCopyDescription(wholeDisk) as? [String: Any] {
                     
-                    // 1. Считываем модель физического устройства
+                    // Считываем модель физического устройства
                     if let modelName = wholeDesc[kDADiskDescriptionDeviceModelKey as String] as? String {
                         let trimmed = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
                         if !trimmed.isEmpty && trimmed != "Internal Drive" {
@@ -217,7 +217,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                         }
                     }
                     
-                    // Нативно приклеиваем имя вендора (Samsung, SanDisk), если его не было в названии модели
+                    // имя вендора (Samsung, SanDisk), если его не было в названии модели
                     if let vendorName = wholeDesc[kDADiskDescriptionDeviceVendorKey as String] as? String {
                         let vendorTrimmed = vendorName.trimmingCharacters(in: .whitespacesAndNewlines)
                         if !vendorTrimmed.isEmpty && !physName.contains(vendorTrimmed) && vendorTrimmed != "Apple" {
@@ -225,7 +225,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                         }
                     }
                     
-                    // 2. Определяем протокол шины подключения (USB / Thunderbolt / PCIe)
+                    // Определяем протокол шины подключения (USB / Thunderbolt / PCIe)
                     if let protocolName = wholeDesc[kDADiskDescriptionDeviceProtocolKey as String] as? String {
                         let protoUpper = protocolName.uppercased()
                         if protoUpper.contains("USB") {
@@ -433,7 +433,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             let submenu = NSMenu()
             
             let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
-            let versionItem = NSMenuItem(title: "Версия приложения: v\(currentVersion)", action: nil, keyEquivalent: "")
+            let versionItem = NSMenuItem(title: "Версия приложения: \(currentVersion)", action: nil, keyEquivalent: "")
             versionItem.isEnabled = false
             submenu.addItem(versionItem)
             
@@ -613,14 +613,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
     @objc func manualUpdateCheck() {
         AppUpdater.checkForUpdates(silent: false)
     }
-} // <--- ЗДЕСЬ ОКОНЧАТЕЛЬНО ЗАКРЫВАЕТСЯ КЛАСС APPDELEGATE
+} // <--- ЗДЕСЬ ЗАКРЫВАЕТСЯ КЛАСС APPDELEGATE
 
 // =================================================================
-// КЛАСС АВТООБНОВЛЕНИЯ (РАЗМЕЩАЕТСЯ ОТДЕЛЬНО В КОНЦЕ ФАЙЛА)
+// КЛАСС АВТООБНОВЛЕНИЯ
 // =================================================================
 class AppUpdater {
     // RAW-ссылка на ваш json-манифест в репозитории GitHub
-    static let manifestURL = URL(string: "https://githubusercontent.com")!
+    static let manifestURL = URL(string: "https://raw.githubusercontent.com/Andrej-Antipov/MountEFI_Menu/refs/heads/main/mountefi_version.json")!
     
     static func checkForUpdates(silent: Bool = true) {
         let task = URLSession.shared.dataTask(with: manifestURL) { data, response, error in
@@ -642,7 +642,7 @@ class AppUpdater {
                         DispatchQueue.main.async {
                             let alert = NSAlert()
                             alert.messageText = "Обновление не требуется"
-                            alert.informativeText = "У вас установлена самая свежая версия v\(currentVersion)."
+                            alert.informativeText = "У вас установлена самая свежая версия \(currentVersion)."
                             alert.runModal()
                         }
                     }
