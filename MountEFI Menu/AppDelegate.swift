@@ -473,33 +473,62 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
     }
     
     @objc func handlePasswordButton(_ sender: NSMenuItem) {
-        // Проверяем реальное наличие plist-файла на диске
+        // Если файл пароля существует — тихо удаляем его
         if FileManager.default.fileExists(atPath: confPath) {
             try? FileManager.default.removeItem(atPath: confPath)
             showNotification(title: "Связка ключей", text: "Пароль успешно удален")
         } else {
             let alert = NSAlert()
             alert.messageText = "Настройка пароля"
-            alert.informativeText = "Введите пароль администратора этого Mac."
+            alert.informativeText = "Введите пароль администратора этого Mac для быстрого монтирования дисков."
             alert.addButton(withTitle: "Сохранить")
             alert.addButton(withTitle: "Отмена")
             
             let inputTextField = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
             alert.accessoryView = inputTextField
             
+            // ИСПРАВЛЕНО: Убрали if let, так как alert.window не является опционалом в актуальном SDK
+            let alertWindow = alert.window
+            alertWindow.makeKeyAndOrderFront(nil)
+            alertWindow.initialFirstResponder = inputTextField
+            
             if alert.runModal() == .alertFirstButtonReturn {
+
                 let password = inputTextField.stringValue
+                
                 if !password.isEmpty {
-                    let base64Str = Data(password.utf8).base64EncodedString()
-                    let dict: NSDictionary = ["m_pass": base64Str]
-                    dict.write(toFile: confPath, atomically: true)
-                    showNotification(title: "Успешно", text: "Пароль зашифрован и сохранен!")
+                    // ИСПРАВЛЕНО (ВАЛИДАЦИЯ): Проверяем пароль через тестовый вызов sudo в фоне
+                    let checkTask = Process()
+                    checkTask.launchPath = "/bin/bash"
+                    // sudo -k сбрасывает кэш паролей, sudo -S true проверяет переданную строку
+                    checkTask.arguments = ["-c", "sudo -k && echo '\(password)' | sudo -S true"]
+                    
+                    let errorPipe = Pipe()
+                    checkTask.standardError = errorPipe // Перехватываем сообщения об ошибках
+                    checkTask.launch()
+                    checkTask.waitUntilExit()
+                    
+                    if checkTask.terminationStatus == 0 {
+                        // Пароль валидный — шифруем и сохраняем
+                        let base64Str = Data(password.utf8).base64EncodedString()
+                        let dict: NSDictionary = ["m_pass": base64Str]
+                        dict.write(toFile: confPath, atomically: true)
+                        showNotification(title: "Успешно", text: "Пароль проверен и сохранен!")
+                    } else {
+                        // Пароль не подошел — выводим ошибку
+                        let errorAlert = NSAlert()
+                        errorAlert.messageText = "Ошибка авторизации"
+                        errorAlert.informativeText = "Введенный пароль не является валидным паролем администратора для этого Mac. Попробуйте еще раз."
+                        errorAlert.addButton(withTitle: "ОК")
+                        errorAlert.runModal()
+                    }
                 }
             }
         }
         self.needsRefresh = true
         self.asyncHotplugMonitor()
     }
+
 
     @objc func toggleMount(_ sender: NSMenuItem) {
         guard let diskId = sender.representedObject as? String else { return }
