@@ -2,14 +2,69 @@ import Cocoa
 import Foundation
 import UserNotifications
 
+class BootEFIFinder {
+    static func findCurrentSystemEFI() -> String? {
+        let task = Process()
+        task.launchPath = "/bin/bash"
+        task.arguments = ["-c", "/usr/sbin/diskutil info / | /usr/bin/grep 'APFS Container Reference' | /usr/bin/awk '{print $NF}'"]
+        
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.launch()
+        task.waitUntilExit()
+        
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        var containerDisk = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        
+        if containerDisk.isEmpty {
+            let backupTask = Process()
+            backupTask.launchPath = "/bin/bash"
+            backupTask.arguments = ["-c", "/usr/sbin/diskutil info / | /usr/bin/grep 'Device Identifier' | /usr/bin/awk '{print $NF}'"]
+            let backupPipe = Pipe()
+            backupTask.standardOutput = backupPipe
+            backupTask.launch()
+            backupTask.waitUntilExit()
+            let backupData = backupPipe.fileHandleForReading.readDataToEndOfFile()
+            containerDisk = String(data: backupData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        }
+        
+        let pattern = try! NSRegularExpression(pattern: "(disk\\d+)")
+        let nsDisk = containerDisk as NSString
+        let match = pattern.firstMatch(in: containerDisk, range: NSRange(location: 0, length: nsDisk.length))
+        let parentDisk = match != nil ? nsDisk.substring(with: match!.range(at: 1)) : "disk0"
+        
+        let listTask = Process()
+        listTask.launchPath = "/bin/bash"
+        
+        // ВНИМАНИЕ: Для боевого релиза оставьте только 'EFI|ESP'
+        // Чтобы на M4 прямо сейчас протестировать кнопку, оставлено 'EFI|ESP|Apple_ISC|Apple_APFS_ISC'
+        listTask.arguments = ["-c", "/usr/sbin/diskutil list \(parentDisk) | /usr/bin/grep -E 'EFI|ESP|Apple_ISC|Apple_APFS_ISC' | /usr/bin/awk '{print $NF}'"]
+        
+        let listPipe = Pipe()
+        listTask.standardOutput = listPipe
+        listTask.launch()
+        listTask.waitUntilExit()
+        
+        let listData = listPipe.fileHandleForReading.readDataToEndOfFile()
+        if let output = String(data: listData, encoding: .utf8) {
+            let parts = output.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+            return parts.first
+        }
+        
+        return nil
+    }
+}
+
 @main
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemValidation {
 
     // Элементы интерфейса статус-бара
     var statusItem: NSStatusItem!
     let statusMenu = NSMenu()
+    
 
     // Переменные состояния
+    var systemEFIDisk: String? = nil
     var menuIsOpen = false
     var lastDisksCount = 0
     var knownDiskIds: Set<String> = [] // Хранит ID для отслеживания физического подключения дисков
@@ -32,14 +87,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
     }
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
+        // УДАЛИТЕ ИЛИ ЗАКОММЕНТИРУЙТЕ СТРОКУ ЗДЕСЬ:
+        // self.systemEFIDisk = BootEFIFinder.findCurrentSystemEFI()
+        
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         
         if let button = statusItem.button {
-            // ДОБАВЛЕНО: Всплывающая подсказка при наведении мышки
             button.toolTip = "MountEFI Menu"
             if let resourcePath = Bundle.main.path(forResource: "MenuLogo", ofType: "png"),
                let customIcon = NSImage(contentsOfFile: resourcePath) {
-                customIcon.isTemplate = false // Автоматический Dark Mode
+                customIcon.isTemplate = false
                 customIcon.size = NSSize(width: 18, height: 18)
                 button.image = customIcon
             } else {
@@ -56,8 +113,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         statusMenu.delegate = self
         statusItem.menu = statusMenu
         
-        // Первичное наполнение структуры известных ID дисков при старте
+        // ПЕРЕНЕСИТЕ ВЫЧИСЛЕНИЕ СЮДА (В фоновый поток инициализации):
         DispatchQueue.global(qos: .userInitiated).async {
+            // Вычисляем один раз в фоне, исключая зависание интерфейса и гонку потоков
+            self.systemEFIDisk = BootEFIFinder.findCurrentSystemEFI()
+            
             let initialDisks = self.getEfiDisks()
             self.knownDiskIds = Set(initialDisks.map { $0.id })
             self.lastDisksCount = initialDisks.count
@@ -77,7 +137,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             }
         }
     }
-
     func menuWillOpen(_ menu: NSMenu) {
         menuIsOpen = true
     }
@@ -192,6 +251,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         return String(data: data, encoding: .utf8) ?? ""
     }
+    
+    @objc func mountCurrentSystemEFI(_ sender: NSMenuItem) {
+        guard let efiTarget = sender.representedObject as? String else { return }
+        
+        let dummyItem = NSMenuItem()
+        dummyItem.representedObject = efiTarget
+        
+        self.toggleMount(dummyItem)
+    }
+
 
     @objc func asyncHotplugMonitor() {
         if menuIsOpen { return }
@@ -251,7 +320,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 emptyItem.isEnabled = false
                 self.statusMenu.addItem(emptyItem)
             } else {
-                // Разделяем массив дисков строго на три независимые категории
                 let internalDisks = disks.filter { !$0.isUsb && !$0.isThunderbolt }
                 let thunderboltDisks = disks.filter { $0.isThunderbolt }
                 let usbDisks = disks.filter { $0.isUsb }
@@ -265,7 +333,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                     for disk in internalDisks {
                         let status = disk.isMounted ? "🟢" : "🔴"
                         let title = "\(status) \(disk.id) [\(disk.type)] (\(disk.physName))"
-
                         let item = NSMenuItem(title: title, action: #selector(self.toggleMount(_:)), keyEquivalent: "")
                         item.representedObject = disk.id
                         item.target = self
@@ -273,21 +340,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                     }
                 }
                 
-                // 2. СЕКЦИЯ: Внешние Thunderbolt диски (Размещена второй)
+                // 2. СЕКЦИЯ: Внешние Thunderbolt диски
                 if !thunderboltDisks.isEmpty {
                     if !internalDisks.isEmpty {
                         self.statusMenu.addItem(NSMenuItem.separator())
                     }
-                    
                     let header = NSMenuItem(title: "Внешние Thunderbolt", action: nil, keyEquivalent: "")
                     header.isEnabled = false
                     self.statusMenu.addItem(header)
                     
                     for disk in thunderboltDisks {
                         let status = disk.isMounted ? "🟢" : "🔴"
-                        // Для Thunderbolt выводим красивую иконку молнии ⚡️
                         let title = "\(status) ⚡️ \(disk.id) [\(disk.type)] (\(disk.physName))"
-
                         let item = NSMenuItem(title: title, action: #selector(self.toggleMount(_:)), keyEquivalent: "")
                         item.representedObject = disk.id
                         item.target = self
@@ -300,7 +364,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                     if !internalDisks.isEmpty || !thunderboltDisks.isEmpty {
                         self.statusMenu.addItem(NSMenuItem.separator())
                     }
-                    
                     let header = NSMenuItem(title: "Внешние USB", action: nil, keyEquivalent: "")
                     header.isEnabled = false
                     self.statusMenu.addItem(header)
@@ -308,7 +371,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                     for disk in usbDisks {
                         let status = disk.isMounted ? "🟢" : "🔴"
                         let title = "\(status) 🔌 \(disk.id) [\(disk.type)] (\(disk.physName))"
-
                         let item = NSMenuItem(title: title, action: #selector(self.toggleMount(_:)), keyEquivalent: "")
                         item.representedObject = disk.id
                         item.target = self
@@ -317,8 +379,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 }
             }
             
-            // Подвал меню
+
+            // =================================================================
+            // ПОДВАЛ МЕНЮ (Формируется ВСЕГДА)
+            // =================================================================
             self.statusMenu.addItem(NSMenuItem.separator())
+            
+            // ВЫВОДИМ СИСТЕМНЫЙ ПУНКТ (Строгий и чистый стиль без индикаторов и скобок)
+            if let bootEFI = self.systemEFIDisk {
+                let systemDiskInfo = disks.first { $0.id == bootEFI }
+                let isMounted = systemDiskInfo?.isMounted ?? false
+                
+                // Текст меняется (Подключить/Размонтировать), но без смайликов и ID диска
+                let actionText = isMounted ? "Размонтировать" : "Подключить"
+                
+                let bootEfiItem = NSMenuItem(
+                    title: "💻 \(actionText) EFI текущей системы",
+                    action: #selector(self.mountCurrentSystemEFI(_:)),
+                    keyEquivalent: "e"
+                )
+                bootEfiItem.representedObject = bootEFI
+                bootEfiItem.target = self
+                
+                self.statusMenu.addItem(bootEfiItem)
+                self.statusMenu.addItem(NSMenuItem.separator()) // Разделитель перед паролем
+            }
             
             let hasPassword = self.getStoredPassword() != nil
             let passTitle = hasPassword ? "Удалить пароль администратора" : "Задать пароль администратора"
@@ -331,7 +416,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             quitItem.target = self
             self.statusMenu.addItem(quitItem)
         }
-    }
+    } // Конец метода updateMenuOnMainThread
+
+
 
     func getStoredPassword() -> String? {
         if let dict = NSDictionary(contentsOfFile: confPath),
