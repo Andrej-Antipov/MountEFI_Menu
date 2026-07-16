@@ -196,9 +196,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             
             // Получаем низкоуровневый объект диска по его BSD-имени (например, "disk0s1")
             if let disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, part) {
-                // Поднимаемся к "целому" физическому диску, чтобы забрать паспорт вендора и модели накопителя
+                // если диск форматируется и описание временно недоступно,
+                // guard безопасно пропустит его, не вызывая зависания
+                guard let description = DADiskCopyDescription(disk) as? [String: Any] else { continue }
+                
                 if let wholeDisk = DADiskCopyWholeDisk(disk),
                    let wholeDesc = DADiskCopyDescription(wholeDisk) as? [String: Any] {
+
                     
                     // Считываем модель физического устройства
                     if let modelName = wholeDesc[kDADiskDescriptionDeviceModelKey as String] as? String {
@@ -294,9 +298,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         DispatchQueue.global(qos: .userInitiated).async {
             let disks = self.getEfiDisks()
             let currentCount = disks.count
-            var mountStatusChanged = false
             
-            DispatchQueue.main.sync {
+            // ИСПРАВЛЕНО: уходим на главный поток асинхронно (async вместо sync),
+            // чтобы полностью исключить блокировку UI при форматировании дисков
+            DispatchQueue.main.async {
+                var mountStatusChanged = false
+                
                 for disk in disks {
                     if let item = self.statusMenu.items.first(where: { ($0.representedObject as? String) == disk.id }) {
                         let titleContainsGreen = item.title.contains("🟢")
@@ -306,26 +313,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                         }
                     }
                 }
-            }
-            
-            for disk in disks {
-                if (disk.isUsb || disk.isThunderbolt) && !self.knownDiskIds.contains(disk.id) {
-                    let typeStr = disk.isThunderbolt ? "Thunderbolt" : "USB"
-                    DispatchQueue.main.async {
+                
+                // Проверяем уведомления о подключении
+                for disk in disks {
+                    if (disk.isUsb || disk.isThunderbolt) && !self.knownDiskIds.contains(disk.id) {
+                        let typeStr = disk.isThunderbolt ? "Thunderbolt" : "USB"
                         self.showNotification(
                             title: "MountEFI Menu",
                             text: "Подключен \(typeStr) накопитель: Обнаружен \(disk.id) (\(disk.physName))"
                         )
                     }
                 }
-            }
-            
-            if currentCount != self.lastDisksCount || mountStatusChanged || self.needsRefresh {
-                self.lastDisksCount = currentCount
-                self.knownDiskIds = Set(disks.map { $0.id })
-                self.updateMenuOnMainThread(with: disks)
-            } else {
-                self.knownDiskIds = Set(disks.map { $0.id })
+                
+                // Если состав или статус дисков изменились — запускаем фоновую перерисовку
+                if currentCount != self.lastDisksCount || mountStatusChanged || self.needsRefresh {
+                    self.lastDisksCount = currentCount
+                    self.knownDiskIds = Set(disks.map { $0.id })
+                    self.updateMenuOnMainThread(with: disks)
+                } else {
+                    self.knownDiskIds = Set(disks.map { $0.id })
+                }
             }
         }
     }
