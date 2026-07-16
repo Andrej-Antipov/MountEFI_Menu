@@ -3,54 +3,57 @@ import Foundation
 import UserNotifications
 
 class BootEFIFinder {
+    
     static func findCurrentSystemEFI() -> String? {
-        let task = Process()
-        task.launchPath = "/bin/bash"
-        task.arguments = ["-c", "/usr/sbin/diskutil info / | /usr/bin/grep 'APFS Container Reference' | /usr/bin/awk '{print $NF}'"]
+        var stats = statfs()
+        guard statfs("/", &stats) == 0 else { return nil }
         
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.launch()
-        task.waitUntilExit()
+        let bootPartitionBSD = withUnsafePointer(to: &stats.f_mntfromname) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(MNAMELEN)) { String(cString: $0) }
+        }.replacingOccurrences(of: "/dev/", with: "")
         
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        var containerDisk = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return findEFISibling(for: bootPartitionBSD)
+    }
+    
+    private static func findEFISibling(for bsdName: String) -> String? {
+        let mainPort = mach_port_t(0)
+        let matchingDict = IOServiceMatching("IOMedia") as NSMutableDictionary
+        matchingDict["BSD Name"] = bsdName
         
-        if containerDisk.isEmpty {
-            let backupTask = Process()
-            backupTask.launchPath = "/bin/bash"
-            backupTask.arguments = ["-c", "/usr/sbin/diskutil info / | /usr/bin/grep 'Device Identifier' | /usr/bin/awk '{print $NF}'"]
-            let backupPipe = Pipe()
-            backupTask.standardOutput = backupPipe
-            backupTask.launch()
-            backupTask.waitUntilExit()
-            let backupData = backupPipe.fileHandleForReading.readDataToEndOfFile()
-            containerDisk = String(data: backupData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let service = IOServiceGetMatchingService(mainPort, matchingDict)
+        if service == MACH_PORT_NULL { return nil }
+        defer { IOObjectRelease(service) }
+        
+        var currentEntry = service
+        IOObjectRetain(currentEntry)
+        var parent: io_object_t = 0
+        
+        while IORegistryEntryGetParentEntry(currentEntry, kIOServicePlane, &parent) == kIOReturnSuccess {
+            IOObjectRelease(currentEntry)
+            currentEntry = parent
+            
+            var iterator: io_iterator_t = 0
+            if IORegistryEntryGetChildIterator(currentEntry, kIOServicePlane, &iterator) == kIOReturnSuccess {
+                var child = IOIteratorNext(iterator)
+                while child != MACH_PORT_NULL {
+                    defer { IOObjectRelease(child) }
+                    
+                    if let content = IORegistryEntryCreateCFProperty(child, "Content" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? String {
+                        let contentUpper = content.uppercased()
+                        if contentUpper.contains("EFI") || content == "C12A7328-F81F-11D2-BA4B-00A0C93EC93B" {
+                            if let efiBSDName = IORegistryEntryCreateCFProperty(child, "BSD Name" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? String {
+                                IOObjectRelease(iterator)
+                                IOObjectRelease(currentEntry)
+                                return efiBSDName
+                            }
+                        }
+                    }
+                    child = IOIteratorNext(iterator)
+                }
+                IOObjectRelease(iterator)
+            }
         }
-        
-        let pattern = try! NSRegularExpression(pattern: "(disk\\d+)")
-        let nsDisk = containerDisk as NSString
-        let match = pattern.firstMatch(in: containerDisk, range: NSRange(location: 0, length: nsDisk.length))
-        let parentDisk = match != nil ? nsDisk.substring(with: match!.range(at: 1)) : "disk0"
-        
-        let listTask = Process()
-        listTask.launchPath = "/bin/bash"
-        
-        // ВНИМАНИЕ: Для боевого релиза оставьте только 'EFI|ESP'
-        // Чтобы на M4 прямо сейчас протестировать кнопку, оставлено 'EFI|ESP|Apple_ISC|Apple_APFS_ISC'
-        listTask.arguments = ["-c", "/usr/sbin/diskutil list \(parentDisk) | /usr/bin/grep -E 'EFI|ESP|Apple_ISC|Apple_APFS_ISC' | /usr/bin/awk '{print $NF}'"]
-        
-        let listPipe = Pipe()
-        listTask.standardOutput = listPipe
-        listTask.launch()
-        listTask.waitUntilExit()
-        
-        let listData = listPipe.fileHandleForReading.readDataToEndOfFile()
-        if let output = String(data: listData, encoding: .utf8) {
-            let parts = output.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
-            return parts.first
-        }
-        
+        IOObjectRelease(currentEntry)
         return nil
     }
 }
@@ -177,53 +180,50 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         var efiData: [EfiDisk] = []
         if partitions.isEmpty { return [] }
         
-        // КЭШ ИСПРАВЛЕН: Добавлен булев флаг для Thunderbolt накопителей
-        var driveCache: [String: (name: String, isUsb: Bool, isThunderbolt: Bool)] = [:]
         let mountOutput = runShell("/sbin/mount")
         
+        // Создаем единую сессию для общения с дисковым арбитром macOS
+        guard let session = DASessionCreate(kCFAllocatorDefault) else { return [] }
+        
         for part in partitions {
-            let pattern = try! NSRegularExpression(pattern: "(disk\\d+)")
-            let nsPart = part as NSString
-            let match = pattern.firstMatch(in: part, range: NSRange(location: 0, length: nsPart.length))
-            let parentDisk = match != nil ? nsPart.substring(with: match!.range(at: 1)) : "disk0"
+            var physName = "Internal Drive"
+            var isUsb = false
+            var isThunderbolt = false
             
-            if driveCache[parentDisk] == nil {
-                let infoTask = Process()
-                infoTask.launchPath = "/bin/bash"
-                
-                // ОПТИМИЗИРОВАНО: Запрашиваем протокол, локацию и медиа-имя одновременно за ОДИН вызов
-                infoTask.arguments = ["-c", "/usr/sbin/diskutil info \(parentDisk) | grep -E 'Protocol|Location|Device / Media Name|Media Name'"]
-                
-                let infoPipe = Pipe()
-                infoTask.standardOutput = infoPipe
-                infoTask.launch()
-                infoTask.waitUntilExit()
-                
-                let infoOutput = String(data: infoPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                
-                let isUsb = infoOutput.contains("USB")
-                let isExternal = infoOutput.contains("External")
-                let isPCIe = infoOutput.contains("PCI-Express") || infoOutput.contains("Apple Fabric")
-                let isThunderbolt = isExternal && isPCIe // Определение Thunderbolt шины
-                
-                var physName = ""
-                let lines = infoOutput.components(separatedBy: "\n")
-                if let nameLine = lines.first(where: { $0.contains("Media Name") }) {
-                    if let colonIndex = nameLine.firstIndex(of: ":") {
-                        let afterColon = nameLine[nameLine.index(after: colonIndex)...]
-                        physName = afterColon.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Получаем низкоуровневый объект диска по его BSD-имени (например, "disk0s1")
+            if let disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, part) {
+                // Извлекаем весь словарь свойств этого диска (аналог ioreg -l)
+                if let description = DADiskCopyDescription(disk) as? [String: Any] {
+                    
+                    // 1. ИЩЕМ НАСТОЯЩЕЕ ИМЯ МОДЕЛИ (Media Name / Device Model)
+                    // DiskArbitration автоматически пробивает контейнеры APFS и возвращает имя физического железа
+                    if let modelName = description[kDADiskDescriptionDeviceModelKey as String] as? String {
+                        physName = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    } else if let mediaName = description[kDADiskDescriptionMediaNameKey as String] as? String {
+                        physName = mediaName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                    
+                    // 2. ОПРЕДЕЛЯЕМ ПРОТОКОЛЫ ПОДКЛЮЧЕНИЯ (USB / Thunderbolt)
+                    if let protocolName = description[kDADiskDescriptionDeviceProtocolKey as String] as? String {
+                        let protoUpper = protocolName.uppercased()
+                        if protoUpper.contains("USB") {
+                            isUsb = true
+                        } else if protoUpper.contains("PCI") || protoUpper.contains("NVME") || protoUpper.contains("THUNDERBOLT") {
+                            // Если диск внешний (не встроенный) и протокол PCIe/NVMe — это Thunderbolt
+                            if let isInternalNum = description[kDADiskDescriptionDeviceInternalKey as String] as? Bool, !isInternalNum {
+                                isThunderbolt = true
+                            }
+                        }
                     }
                 }
-                
-                if physName.isEmpty {
-                    if isThunderbolt { physName = "Thunderbolt NVMe" }
-                    else { physName = isUsb ? "USB Storage" : "Internal Drive" }
-                }
-                
-                driveCache[parentDisk] = (name: physName, isUsb: isUsb, isThunderbolt: isThunderbolt)
             }
             
-            let hwInfo = driveCache[parentDisk]!
+            // Если имя диска вернулось системной заглушкой, подставляем красивые дефолты
+            if physName.isEmpty || physName == "Internal Drive" || physName == "Media" {
+                if isThunderbolt { physName = "Thunderbolt NVMe" }
+                else { physName = isUsb ? "USB Storage" : "Internal Drive" }
+            }
+            
             let isMounted = mountOutput.contains("/dev/\(part) ")
             let size = "---"
             
@@ -232,13 +232,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 partType = "ISC"
             }
             
-            let vName = "EFI"
-            
-            efiData.append(EfiDisk(id: part, physName: hwInfo.name, isUsb: hwInfo.isUsb, isThunderbolt: hwInfo.isThunderbolt, isMounted: isMounted, size: size, type: partType, volumeName: vName))
+            efiData.append(EfiDisk(
+                id: part,
+                physName: physName,
+                isUsb: isUsb,
+                isThunderbolt: isThunderbolt,
+                isMounted: isMounted,
+                size: size,
+                type: partType,
+                volumeName: "EFI"
+            ))
         }
         return efiData
     }
 
+
+    // Этот легкий метод остается только для вызова базовых команд mount/unmount в macOS
     func runShell(_ command: String) -> String {
         let task = Process()
         let pipe = Pipe()
@@ -251,6 +260,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         return String(data: data, encoding: .utf8) ?? ""
     }
+
     
     @objc func mountCurrentSystemEFI(_ sender: NSMenuItem) {
         guard let efiTarget = sender.representedObject as? String else { return }
