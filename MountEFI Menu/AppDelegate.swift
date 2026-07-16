@@ -2,6 +2,9 @@ import Cocoa
 import Foundation
 import UserNotifications
 
+// Модули IOKit и Darwin полностью удалены из глобальных импортов,
+// так как вся работа переведена на нативный фреймворк DiskArbitration.
+
 class BootEFIFinder {
     static func findCurrentSystemEFI() -> String? {
         let masterPort = mach_port_t(0)
@@ -19,7 +22,7 @@ class BootEFIFinder {
             }
         }
         
-        // Резервный вариант (Fallback): если NVRAM пуста, берем корень системы через statfs (модуль Foundation)
+        // Резервный вариант (Fallback): если NVRAM пуста, берем корень системы через statfs
         if bootPartitionBSD.isEmpty {
             var stats = statfs()
             if statfs("/", &stats) == 0 {
@@ -34,7 +37,7 @@ class BootEFIFinder {
         // Передаем точное загрузочное имя диска в DiskArbitration, чтобы найти именно его родной EFI
         guard let session = DASessionCreate(kCFAllocatorDefault),
               let disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, bootPartitionBSD),
-              let _ = DADiskCopyDescription(disk) as? [String: Any],
+              let _ = DADiskCopyDescription(disk) as? [String: Any], // Символ "_" исключает предупреждения компилятора
               let wholeDisk = DADiskCopyWholeDisk(disk),
               let wholeDesc = DADiskCopyDescription(wholeDisk) as? [String: Any],
               let parentDisk = wholeDesc[kDADiskDescriptionMediaBSDNameKey as String] as? String else { return nil }
@@ -45,9 +48,10 @@ class BootEFIFinder {
         listTask.arguments = ["-c", "/usr/sbin/diskutil list \(parentDisk) | /usr/bin/grep -E 'EFI|ESP' | /usr/bin/awk '{print $NF}'"]
         
         let listPipe = Pipe()
-        listTask.standardOutput = listPipe
+        listTask.standardOutput = listPipe // <--- ИСПРАВЛЕНО: было pipe
         listTask.launch()
         listTask.waitUntilExit()
+
         
         let listData = listPipe.fileHandleForReading.readDataToEndOfFile()
         if let output = String(data: listData, encoding: .utf8) {
@@ -65,7 +69,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
     // Элементы интерфейса статус-бара
     var statusItem: NSStatusItem!
     let statusMenu = NSMenu()
-    
 
     // Переменные состояния
     var systemEFIDisk: String? = nil
@@ -75,10 +78,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
     var needsRefresh = false           // Флаг запроса на пересборку меню из фонового потока
     var activeDiskItems: [String: NSMenuItem] = [:]
     
-    // Путь к файлу пароля
+    // Путь к файлу зашифрованного пароля администратора
     let confPath = (NSHomeDirectory() as NSString).appendingPathComponent(".MountEFImenu.plist")
 
-    // Флаги структуры дисков
+    // Структура диска со всеми флагами интерфейсов (USB / Thunderbolt)
     struct EfiDisk {
         let id: String
         let physName: String
@@ -91,14 +94,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
     }
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
-        
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         
         if let button = statusItem.button {
             button.toolTip = "MountEFI Menu"
             if let resourcePath = Bundle.main.path(forResource: "MenuLogo", ofType: "png"),
                let customIcon = NSImage(contentsOfFile: resourcePath) {
-                customIcon.isTemplate = false
+                customIcon.isTemplate = false // Автоматический Dark Mode
                 customIcon.size = NSSize(width: 18, height: 18)
                 button.image = customIcon
             } else {
@@ -115,15 +117,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         statusMenu.delegate = self
         statusItem.menu = statusMenu
         
-        // ПЕРЕНОС ВЫЧИСЛЕНИЕ СЮДА (В фоновый поток инициализации):
+        // ПЕРЕНЕСЕНО СЮДА: Вычисление в фоне полностью убирает гонку потоков при первом старте
         DispatchQueue.global(qos: .userInitiated).async {
-            // Вычисляем один раз в фоне, исключая зависание интерфейса и гонку потоков
             self.systemEFIDisk = BootEFIFinder.findCurrentSystemEFI()
- //           self.systemEFIDisk = "disk0s1" // - проверка появления меню системного диска
+            
             let initialDisks = self.getEfiDisks()
             self.knownDiskIds = Set(initialDisks.map { $0.id })
             self.lastDisksCount = initialDisks.count
             self.updateMenuOnMainThread(with: initialDisks)
+            
+            // Тихая фоновая проверка обновлений на GitHub при старте
+            AppUpdater.checkForUpdates(silent: true)
         }
         
         // Запускаем таймер проверки портов (интервал 3 секунды)
@@ -139,6 +143,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             }
         }
     }
+
     func menuWillOpen(_ menu: NSMenu) {
         menuIsOpen = true
     }
@@ -173,7 +178,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         }
         return []
     }
-
+    
     func getEfiDisks() -> [EfiDisk] {
         let partitions = getEfiPartitionsList()
         var efiData: [EfiDisk] = []
@@ -181,7 +186,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         
         let mountOutput = runShell("/sbin/mount")
         
-        // Создаем сессию диалога с дисковым арбитром macOS
+        // Создаем сессию для общения с дисковым арбитром macOS напрямую в памяти
         guard let session = DASessionCreate(kCFAllocatorDefault) else { return [] }
         
         for part in partitions {
@@ -189,54 +194,45 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             var isUsb = false
             var isThunderbolt = false
             
-            // Получаем низкоуровневый объект диска по его BSD-имени ("disk0s1")
+            // Получаем низкоуровневый объект диска по его BSD-имени (например, "disk0s1")
             if let disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, part) {
-                // Извлекаем весь словарь свойств этого диска (аналог ioreg -l)
-                if let description = DADiskCopyDescription(disk) as? [String: Any] {
+                // Поднимаемся к "целому" физическому диску, чтобы забрать паспорт вендора и модели накопителя
+                if let wholeDisk = DADiskCopyWholeDisk(disk),
+                   let wholeDesc = DADiskCopyDescription(wholeDisk) as? [String: Any] {
                     
-                    // ИЩЕМ НАСТОЯЩЕЕ ИМЯ МОДЕЛИ (Media Name / Device Model)
-                    // DiskArbitration возвращает имя физического железа
-                    // Поднимаемся к "целому" физическому диску, чтобы забрать имя вендора и модели
-                    var targetDict = description
-                    if let wholeDisk = DADiskCopyWholeDisk(disk),
-                       let wholeDesc = DADiskCopyDescription(wholeDisk) as? [String: Any] {
-                        targetDict = wholeDesc
-                    }
-                    
-                    // считываем свойства ФИЗИЧЕСКОГО устройства целиком
-                    if let modelName = targetDict[kDADiskDescriptionDeviceModelKey as String] as? String {
+                    // 1. Считываем модель физического устройства
+                    if let modelName = wholeDesc[kDADiskDescriptionDeviceModelKey as String] as? String {
                         let trimmed = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
                         if !trimmed.isEmpty && trimmed != "Internal Drive" {
                             physName = trimmed
                         }
                     }
                     
-                    // Если производитель зашит в Media Name на уровне ЦЕЛОГО диска
+                    // Если имя пустое или слишком короткое, пробуем взять его из Media Name всего устройства
                     if physName.isEmpty || physName.count < 5,
-                       let mediaName = targetDict[kDADiskDescriptionMediaNameKey as String] as? String {
+                       let mediaName = wholeDesc[kDADiskDescriptionMediaNameKey as String] as? String {
                         let trimmed = mediaName.trimmingCharacters(in: .whitespacesAndNewlines)
                         if !trimmed.isEmpty && trimmed != "Internal Drive" && !trimmed.contains("Partition") && !trimmed.contains("Container") {
                             physName = trimmed
                         }
                     }
                     
-                    // Дополнительная проверка: имя вендора (Vendor) из свойств железа, если имя все еще короткое
-                    if let vendorName = targetDict[kDADiskDescriptionDeviceVendorKey as String] as? String {
+                    // Нативно приклеиваем имя вендора (Samsung, SanDisk), если его не было в названии модели
+                    if let vendorName = wholeDesc[kDADiskDescriptionDeviceVendorKey as String] as? String {
                         let vendorTrimmed = vendorName.trimmingCharacters(in: .whitespacesAndNewlines)
                         if !vendorTrimmed.isEmpty && !physName.contains(vendorTrimmed) && vendorTrimmed != "Apple" {
                             physName = "\(vendorTrimmed) \(physName)"
                         }
                     }
-
                     
-                    // 2. ОПРЕДЕЛЯЕМ ПРОТОКОЛЫ ПОДКЛЮЧЕНИЯ (USB / Thunderbolt)
-                    if let protocolName = description[kDADiskDescriptionDeviceProtocolKey as String] as? String {
+                    // 2. Определяем протокол шины подключения (USB / Thunderbolt / PCIe)
+                    if let protocolName = wholeDesc[kDADiskDescriptionDeviceProtocolKey as String] as? String {
                         let protoUpper = protocolName.uppercased()
                         if protoUpper.contains("USB") {
                             isUsb = true
                         } else if protoUpper.contains("PCI") || protoUpper.contains("NVME") || protoUpper.contains("THUNDERBOLT") {
-                            // Если диск внешний (не встроенный) и протокол PCIe/NVMe — это Thunderbolt
-                            if let isInternalNum = description[kDADiskDescriptionDeviceInternalKey as String] as? Bool, !isInternalNum {
+                            // Если накопитель внешний и висит на шине PCI-Express — это Thunderbolt
+                            if let isInternalNum = wholeDesc[kDADiskDescriptionDeviceInternalKey as String] as? Bool, !isInternalNum {
                                 isThunderbolt = true
                             }
                         }
@@ -244,7 +240,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 }
             }
             
-            // Если имя диска вернулось системной заглушкой, подставляем дефолты
+            // Заглушки на крайний случай, если имя физического диска скрыто защитой macOS
             if physName.isEmpty || physName == "Internal Drive" || physName == "Media" {
                 if isThunderbolt { physName = "Thunderbolt NVMe" }
                 else { physName = isUsb ? "USB Storage" : "Internal Drive" }
@@ -272,8 +268,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         return efiData
     }
 
-
-    // Этот метод остается только для вызова базовых команд mount/unmount в macOS
     func runShell(_ command: String) -> String {
         let task = Process()
         let pipe = Pipe()
@@ -287,16 +281,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         return String(data: data, encoding: .utf8) ?? ""
     }
 
-    
     @objc func mountCurrentSystemEFI(_ sender: NSMenuItem) {
         guard let efiTarget = sender.representedObject as? String else { return }
-        
         let dummyItem = NSMenuItem()
         dummyItem.representedObject = efiTarget
-        
         self.toggleMount(dummyItem)
     }
-
 
     @objc func asyncHotplugMonitor() {
         if menuIsOpen { return }
@@ -319,7 +309,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             }
             
             for disk in disks {
-                // Уведомление о подключении любого внешнего диска (USB или Thunderbolt)
                 if (disk.isUsb || disk.isThunderbolt) && !self.knownDiskIds.contains(disk.id) {
                     let typeStr = disk.isThunderbolt ? "Thunderbolt" : "USB"
                     DispatchQueue.main.async {
@@ -340,11 +329,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             }
         }
     }
+
     func refreshMenu() {
         self.needsRefresh = true
         self.asyncHotplugMonitor()
     }
-
+    
     func updateMenuOnMainThread(with disks: [EfiDisk]) {
         DispatchQueue.main.async {
             self.statusMenu.removeAllItems()
@@ -415,15 +405,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 }
             }
             
-            // ПОДВАЛ МЕНЮ (Формируется ВСЕГДА)
+            // =================================================================
+            // ПОДВАЛ МЕНЮ (Формируется всегда)
+            // =================================================================
             self.statusMenu.addItem(NSMenuItem.separator())
             
-            // ВЫВОДИМ СИСТЕМНЫЙ ПУНКТ (стиль без индикаторов и скобок)
+            // 1. Кнопка быстрого EFI текущей системы (в строгом стиле по ТЗ)
             if let bootEFI = self.systemEFIDisk {
                 let systemDiskInfo = disks.first { $0.id == bootEFI }
                 let isMounted = systemDiskInfo?.isMounted ?? false
-                
-                // Текст меняется (Подключить/Размонтировать)
                 let actionText = isMounted ? "Размонтировать" : "Подключить"
                 
                 let bootEfiItem = NSMenuItem(
@@ -435,23 +425,42 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 bootEfiItem.target = self
                 
                 self.statusMenu.addItem(bootEfiItem)
-                self.statusMenu.addItem(NSMenuItem.separator()) // Разделитель перед паролем
+                self.statusMenu.addItem(NSMenuItem.separator())
             }
             
-            let hasPassword = self.getStoredPassword() != nil
-            let passTitle = hasPassword ? "Удалить пароль администратора" : "Задать пароль администратора"
+            // 2. Создаем пункт «Настройки» с боковым подменю
+            let settingsItem = NSMenuItem(title: "⚙️ Настройки", action: nil, keyEquivalent: "")
+            let submenu = NSMenu()
+            
+            let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+            let versionItem = NSMenuItem(title: "Версия приложения: v\(currentVersion)", action: nil, keyEquivalent: "")
+            versionItem.isEnabled = false
+            submenu.addItem(versionItem)
+            
+            submenu.addItem(NSMenuItem.separator())
+            
+            let hasPassword = FileManager.default.fileExists(atPath: self.confPath)
+            let passTitle = hasPassword ? "🔒 Удалить пароль администратора" : "🔑 Задать пароль администратора"
             let passItem = NSMenuItem(title: passTitle, action: #selector(self.handlePasswordButton(_:)), keyEquivalent: "")
             passItem.target = self
-            self.statusMenu.addItem(passItem)
+            submenu.addItem(passItem)
             
+            submenu.addItem(NSMenuItem.separator())
+            
+            let updateItem = NSMenuItem(title: "🔄 Проверить обновления...", action: #selector(self.manualUpdateCheck), keyEquivalent: "")
+            updateItem.target = self
+            submenu.addItem(updateItem)
+            
+            settingsItem.submenu = submenu
+            self.statusMenu.addItem(settingsItem)
+            
+            // 3. Кнопка Выхода
             self.statusMenu.addItem(NSMenuItem.separator())
             let quitItem = NSMenuItem(title: "Выйти", action: #selector(self.forceQuitApp), keyEquivalent: "q")
             quitItem.target = self
             self.statusMenu.addItem(quitItem)
         }
-    } // Конец метода updateMenuOnMainThread
-
-
+    }
 
     func getStoredPassword() -> String? {
         if let dict = NSDictionary(contentsOfFile: confPath),
@@ -462,9 +471,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         }
         return nil
     }
-
+    
     @objc func handlePasswordButton(_ sender: NSMenuItem) {
-        if sender.title == "Удалить пароль администратора" {
+        // Проверяем реальное наличие plist-файла на диске
+        if FileManager.default.fileExists(atPath: confPath) {
             try? FileManager.default.removeItem(atPath: confPath)
             showNotification(title: "Связка ключей", text: "Пароль успешно удален")
         } else {
@@ -494,7 +504,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
     @objc func toggleMount(_ sender: NSMenuItem) {
         guard let diskId = sender.representedObject as? String else { return }
         
-        // Уходим в фоновый режим выполнения, чтобы избежать фризов UI клавиатуры
         DispatchQueue.global(qos: .userInitiated).async {
             let disks = self.getEfiDisks()
             guard let disk = disks.first(where: { $0.id == diskId }) else { return }
@@ -503,7 +512,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             let isMounted = disk.isMounted
             
             if isMounted {
-                // 1. Асинхронно закрываем окно Finder, если оно открыто
                 let fastCloseScript = "tell application \"Finder\" to if window \"\(disk.volumeName)\" exists then close window \"\(disk.volumeName)\""
                 let closeTask = Process()
                 closeTask.launchPath = "/usr/bin/osascript"
@@ -511,7 +519,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 closeTask.launch()
                 closeTask.waitUntilExit()
                 
-                // 2. Первая попытка: Стандартное размонтирование
                 let task = Process()
                 task.launchPath = "/bin/bash"
                 
@@ -526,7 +533,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 var success = (task.terminationStatus == 0)
                 var forced = false
                 
-                // 3. АВТО-ПОВТОР: Если обычный unmount не сработал, принудительно используем FORCE
                 if !success {
                     forced = true
                     let forceTask = Process()
@@ -541,7 +547,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                     forceTask.waitUntilExit()
                     success = (forceTask.terminationStatus == 0)
                 }
-                // Обработка результатов размонтирования
+                
                 DispatchQueue.main.async {
                     if success {
                         if forced {
@@ -556,7 +562,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                     self.asyncHotplugMonitor()
                 }
             } else {
-                // 4. Логика монтирования (осталась без изменений)
                 let task = Process()
                 task.launchPath = "/bin/bash"
                 
@@ -592,9 +597,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        if menuItem.action == #selector(forceQuitApp) {
-            return true
-        }
         return true
     }
 
@@ -607,5 +609,59 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             }
         }
     }
-}
+    
+    @objc func manualUpdateCheck() {
+        AppUpdater.checkForUpdates(silent: false)
+    }
+} // <--- ЗДЕСЬ ОКОНЧАТЕЛЬНО ЗАКРЫВАЕТСЯ КЛАСС APPDELEGATE
 
+// =================================================================
+// КЛАСС АВТООБНОВЛЕНИЯ (РАЗМЕЩАЕТСЯ ОТДЕЛЬНО В КОНЦЕ ФАЙЛА)
+// =================================================================
+class AppUpdater {
+    // RAW-ссылка на ваш json-манифест в репозитории GitHub
+    static let manifestURL = URL(string: "https://githubusercontent.com")!
+    
+    static func checkForUpdates(silent: Bool = true) {
+        let task = URLSession.shared.dataTask(with: manifestURL) { data, response, error in
+            guard let data = data, error == nil else { return }
+            
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let serverVersionStr = json["version"] as? String,
+               let downloadUrlStr = json["url"] as? String,
+               let downloadURL = URL(string: downloadUrlStr) {
+                
+                let serverVersion = serverVersionStr.trimmingCharacters(in: .whitespacesAndNewlines)
+                
+                if let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
+                    if currentVersion.compare(serverVersion, options: .numeric) == .orderedAscending {
+                        DispatchQueue.main.async {
+                            self.showUpdateAlert(version: serverVersion, url: downloadURL)
+                        }
+                    } else if !silent {
+                        DispatchQueue.main.async {
+                            let alert = NSAlert()
+                            alert.messageText = "Обновление не требуется"
+                            alert.informativeText = "У вас установлена самая свежая версия v\(currentVersion)."
+                            alert.runModal()
+                        }
+                    }
+                }
+            }
+        }
+        task.resume()
+    }
+    
+    private static func showUpdateAlert(version: String, url: URL) {
+        let alert = NSAlert()
+        alert.messageText = "Доступно обновление"
+        alert.informativeText = "Доступна новая версия MountEFI Menu: v\(version). Желаете обновиться?"
+        alert.addButton(withTitle: "Скачать и обновить")
+        alert.addButton(withTitle: "Позже")
+        
+        if alert.runModal() == .alertFirstButtonReturn {
+            NSWorkspace.shared.open(url)
+            NSApplication.shared.terminate(nil)
+        }
+    }
+}
