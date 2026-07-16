@@ -3,57 +3,58 @@ import Foundation
 import UserNotifications
 
 class BootEFIFinder {
-    
     static func findCurrentSystemEFI() -> String? {
-        var stats = statfs()
-        guard statfs("/", &stats) == 0 else { return nil }
+        let masterPort = mach_port_t(0)
+        // Находим узел "chosen" в дереве устройств, где macOS хранит точный путь железного устройства загрузки
+        let chosenEntry = IORegistryEntryFromPath(masterPort, "IODeviceTree:/chosen")
+        var bootPartitionBSD = ""
         
-        let bootPartitionBSD = withUnsafePointer(to: &stats.f_mntfromname) {
-            $0.withMemoryRebound(to: CChar.self, capacity: Int(MNAMELEN)) { String(cString: $0) }
-        }.replacingOccurrences(of: "/dev/", with: "")
-        
-        return findEFISibling(for: bootPartitionBSD)
-    }
-    
-    private static func findEFISibling(for bsdName: String) -> String? {
-        let mainPort = mach_port_t(0)
-        let matchingDict = IOServiceMatching("IOMedia") as NSMutableDictionary
-        matchingDict["BSD Name"] = bsdName
-        
-        let service = IOServiceGetMatchingService(mainPort, matchingDict)
-        if service == MACH_PORT_NULL { return nil }
-        defer { IOObjectRelease(service) }
-        
-        var currentEntry = service
-        IOObjectRetain(currentEntry)
-        var parent: io_object_t = 0
-        
-        while IORegistryEntryGetParentEntry(currentEntry, kIOServicePlane, &parent) == kIOReturnSuccess {
-            IOObjectRelease(currentEntry)
-            currentEntry = parent
-            
-            var iterator: io_iterator_t = 0
-            if IORegistryEntryGetChildIterator(currentEntry, kIOServicePlane, &iterator) == kIOReturnSuccess {
-                var child = IOIteratorNext(iterator)
-                while child != MACH_PORT_NULL {
-                    defer { IOObjectRelease(child) }
-                    
-                    if let content = IORegistryEntryCreateCFProperty(child, "Content" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? String {
-                        let contentUpper = content.uppercased()
-                        if contentUpper.contains("EFI") || content == "C12A7328-F81F-11D2-BA4B-00A0C93EC93B" {
-                            if let efiBSDName = IORegistryEntryCreateCFProperty(child, "BSD Name" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? String {
-                                IOObjectRelease(iterator)
-                                IOObjectRelease(currentEntry)
-                                return efiBSDName
-                            }
-                        }
-                    }
-                    child = IOIteratorNext(iterator)
+        if chosenEntry != MACH_PORT_NULL {
+            defer { IOObjectRelease(chosenEntry) }
+            if let bootDevicePath = IORegistryEntryCreateCFProperty(chosenEntry, "boot-device-path" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? String {
+                // Извлекаем BSD-имя из аппаратного пути (ищет подстроку вида diskXsY)
+                if let range = bootDevicePath.range(of: "disk[0-9]+s[0-9]+", options: .regularExpression) {
+                    bootPartitionBSD = String(bootDevicePath[range])
                 }
-                IOObjectRelease(iterator)
             }
         }
-        IOObjectRelease(currentEntry)
+        
+        // Резервный вариант (Fallback): если NVRAM пуста, берем корень системы через statfs
+        if bootPartitionBSD.isEmpty {
+            var stats = statfs()
+            if statfs("/", &stats) == 0 {
+                bootPartitionBSD = withUnsafePointer(to: &stats.f_mntfromname) {
+                    $0.withMemoryRebound(to: CChar.self, capacity: Int(MNAMELEN)) { String(cString: $0) }
+                }.replacingOccurrences(of: "/dev/", with: "")
+            }
+        }
+        
+        guard !bootPartitionBSD.isEmpty else { return nil }
+        
+        // Передаем точное загрузочное имя диска в DiskArbitration, чтобы найти именно его родной EFI
+        guard let session = DASessionCreate(kCFAllocatorDefault),
+              let disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, bootPartitionBSD),
+              let _ = DADiskCopyDescription(disk) as? [String: Any],
+              let wholeDisk = DADiskCopyWholeDisk(disk),
+              let wholeDesc = DADiskCopyDescription(wholeDisk) as? [String: Any],
+              let parentDisk = wholeDesc[kDADiskDescriptionMediaBSDNameKey as String] as? String else { return nil }
+        
+        // Сканируем разделы именно того физического диска, с которого запущен загрузчик
+        let listTask = Process()
+        listTask.launchPath = "/bin/bash"
+        listTask.arguments = ["-c", "/usr/sbin/diskutil list \(parentDisk) | /usr/bin/grep -E 'EFI|ESP' | /usr/bin/awk '{print $NF}'"]
+        
+        let listPipe = Pipe()
+        listTask.standardOutput = listPipe
+        listTask.launch()
+        listTask.waitUntilExit()
+        
+        let listData = listPipe.fileHandleForReading.readDataToEndOfFile()
+        if let output = String(data: listData, encoding: .utf8) {
+            let parts = output.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+            return parts.first
+        }
+        
         return nil
     }
 }
@@ -120,7 +121,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         DispatchQueue.global(qos: .userInitiated).async {
             // Вычисляем один раз в фоне, исключая зависание интерфейса и гонку потоков
             self.systemEFIDisk = BootEFIFinder.findCurrentSystemEFI()
-            
+ //           self.systemEFIDisk = "disk0s1" // - проверка появления меню системного диска
             let initialDisks = self.getEfiDisks()
             self.knownDiskIds = Set(initialDisks.map { $0.id })
             self.lastDisksCount = initialDisks.count
@@ -416,10 +417,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 }
             }
             
-
-            // =================================================================
             // ПОДВАЛ МЕНЮ (Формируется ВСЕГДА)
-            // =================================================================
             self.statusMenu.addItem(NSMenuItem.separator())
             
             // ВЫВОДИМ СИСТЕМНЫЙ ПУНКТ (Строгий и чистый стиль без индикаторов и скобок)
