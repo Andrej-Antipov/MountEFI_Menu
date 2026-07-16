@@ -197,11 +197,38 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                     
                     // 1. ИЩЕМ НАСТОЯЩЕЕ ИМЯ МОДЕЛИ (Media Name / Device Model)
                     // DiskArbitration автоматически пробивает контейнеры APFS и возвращает имя физического железа
-                    if let modelName = description[kDADiskDescriptionDeviceModelKey as String] as? String {
-                        physName = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
-                    } else if let mediaName = description[kDADiskDescriptionMediaNameKey as String] as? String {
-                        physName = mediaName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    // 1. ИСПРАВЛЕНО: Поднимаемся к "целому" физическому диску, чтобы забрать имя вендора и модели
+                    var targetDict = description
+                    if let wholeDisk = DADiskCopyWholeDisk(disk),
+                       let wholeDesc = DADiskCopyDescription(wholeDisk) as? [String: Any] {
+                        targetDict = wholeDesc
                     }
+                    
+                    // Теперь считываем свойства именно ФИЗИЧЕСКОГО устройства целиком
+                    if let modelName = targetDict[kDADiskDescriptionDeviceModelKey as String] as? String {
+                        let trimmed = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty && trimmed != "Internal Drive" {
+                            physName = trimmed
+                        }
+                    }
+                    
+                    // Если производитель зашит в Media Name на уровне ЦЕЛОГО диска (характерно для Samsung/SanDisk)
+                    if physName.isEmpty || physName.count < 5,
+                       let mediaName = targetDict[kDADiskDescriptionMediaNameKey as String] as? String {
+                        let trimmed = mediaName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty && trimmed != "Internal Drive" && !trimmed.contains("Partition") && !trimmed.contains("Container") {
+                            physName = trimmed
+                        }
+                    }
+                    
+                    // Дополнительная проверка: имя вендора (Vendor) из свойств железа, если имя все еще короткое
+                    if let vendorName = targetDict[kDADiskDescriptionDeviceVendorKey as String] as? String {
+                        let vendorTrimmed = vendorName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !vendorTrimmed.isEmpty && !physName.contains(vendorTrimmed) && vendorTrimmed != "Apple" {
+                            physName = "\(vendorTrimmed) \(physName)"
+                        }
+                    }
+
                     
                     // 2. ОПРЕДЕЛЯЕМ ПРОТОКОЛЫ ПОДКЛЮЧЕНИЯ (USB / Thunderbolt)
                     if let protocolName = description[kDADiskDescriptionDeviceProtocolKey as String] as? String {
