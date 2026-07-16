@@ -19,7 +19,7 @@ class BootEFIFinder {
             }
         }
         
-        // Резервный вариант (Fallback): если NVRAM пуста, берем корень системы через statfs
+        // Резервный вариант (Fallback): если NVRAM пуста, берем корень системы через statfs (модуль Foundation)
         if bootPartitionBSD.isEmpty {
             var stats = statfs()
             if statfs("/", &stats) == 0 {
@@ -78,7 +78,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
     // Путь к файлу пароля
     let confPath = (NSHomeDirectory() as NSString).appendingPathComponent(".MountEFImenu.plist")
 
-    // ДОБАВЛЕНО: Новый флаг isThunderbolt в структуру диска
+    // Флаги структуры дисков
     struct EfiDisk {
         let id: String
         let physName: String
@@ -91,8 +91,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
     }
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
-        // УДАЛИТЕ ИЛИ ЗАКОММЕНТИРУЙТЕ СТРОКУ ЗДЕСЬ:
-        // self.systemEFIDisk = BootEFIFinder.findCurrentSystemEFI()
         
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         
@@ -117,7 +115,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         statusMenu.delegate = self
         statusItem.menu = statusMenu
         
-        // ПЕРЕНЕСИТЕ ВЫЧИСЛЕНИЕ СЮДА (В фоновый поток инициализации):
+        // ПЕРЕНОС ВЫЧИСЛЕНИЕ СЮДА (В фоновый поток инициализации):
         DispatchQueue.global(qos: .userInitiated).async {
             // Вычисляем один раз в фоне, исключая зависание интерфейса и гонку потоков
             self.systemEFIDisk = BootEFIFinder.findCurrentSystemEFI()
@@ -183,7 +181,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         
         let mountOutput = runShell("/sbin/mount")
         
-        // Создаем единую сессию для общения с дисковым арбитром macOS
+        // Создаем сессию диалога с дисковым арбитром macOS
         guard let session = DASessionCreate(kCFAllocatorDefault) else { return [] }
         
         for part in partitions {
@@ -191,21 +189,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             var isUsb = false
             var isThunderbolt = false
             
-            // Получаем низкоуровневый объект диска по его BSD-имени (например, "disk0s1")
+            // Получаем низкоуровневый объект диска по его BSD-имени ("disk0s1")
             if let disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, part) {
                 // Извлекаем весь словарь свойств этого диска (аналог ioreg -l)
                 if let description = DADiskCopyDescription(disk) as? [String: Any] {
                     
-                    // 1. ИЩЕМ НАСТОЯЩЕЕ ИМЯ МОДЕЛИ (Media Name / Device Model)
-                    // DiskArbitration автоматически пробивает контейнеры APFS и возвращает имя физического железа
-                    // 1. ИСПРАВЛЕНО: Поднимаемся к "целому" физическому диску, чтобы забрать имя вендора и модели
+                    // ИЩЕМ НАСТОЯЩЕЕ ИМЯ МОДЕЛИ (Media Name / Device Model)
+                    // DiskArbitration возвращает имя физического железа
+                    // Поднимаемся к "целому" физическому диску, чтобы забрать имя вендора и модели
                     var targetDict = description
                     if let wholeDisk = DADiskCopyWholeDisk(disk),
                        let wholeDesc = DADiskCopyDescription(wholeDisk) as? [String: Any] {
                         targetDict = wholeDesc
                     }
                     
-                    // Теперь считываем свойства именно ФИЗИЧЕСКОГО устройства целиком
+                    // считываем свойства ФИЗИЧЕСКОГО устройства целиком
                     if let modelName = targetDict[kDADiskDescriptionDeviceModelKey as String] as? String {
                         let trimmed = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
                         if !trimmed.isEmpty && trimmed != "Internal Drive" {
@@ -213,7 +211,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                         }
                     }
                     
-                    // Если производитель зашит в Media Name на уровне ЦЕЛОГО диска (характерно для Samsung/SanDisk)
+                    // Если производитель зашит в Media Name на уровне ЦЕЛОГО диска
                     if physName.isEmpty || physName.count < 5,
                        let mediaName = targetDict[kDADiskDescriptionMediaNameKey as String] as? String {
                         let trimmed = mediaName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -246,7 +244,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 }
             }
             
-            // Если имя диска вернулось системной заглушкой, подставляем красивые дефолты
+            // Если имя диска вернулось системной заглушкой, подставляем дефолты
             if physName.isEmpty || physName == "Internal Drive" || physName == "Media" {
                 if isThunderbolt { physName = "Thunderbolt NVMe" }
                 else { physName = isUsb ? "USB Storage" : "Internal Drive" }
@@ -275,7 +273,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
     }
 
 
-    // Этот легкий метод остается только для вызова базовых команд mount/unmount в macOS
+    // Этот метод остается только для вызова базовых команд mount/unmount в macOS
     func runShell(_ command: String) -> String {
         let task = Process()
         let pipe = Pipe()
@@ -420,12 +418,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             // ПОДВАЛ МЕНЮ (Формируется ВСЕГДА)
             self.statusMenu.addItem(NSMenuItem.separator())
             
-            // ВЫВОДИМ СИСТЕМНЫЙ ПУНКТ (Строгий и чистый стиль без индикаторов и скобок)
+            // ВЫВОДИМ СИСТЕМНЫЙ ПУНКТ (стиль без индикаторов и скобок)
             if let bootEFI = self.systemEFIDisk {
                 let systemDiskInfo = disks.first { $0.id == bootEFI }
                 let isMounted = systemDiskInfo?.isMounted ?? false
                 
-                // Текст меняется (Подключить/Размонтировать), но без смайликов и ID диска
+                // Текст меняется (Подключить/Размонтировать)
                 let actionText = isMounted ? "Размонтировать" : "Подключить"
                 
                 let bootEfiItem = NSMenuItem(
