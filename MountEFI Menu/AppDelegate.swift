@@ -439,6 +439,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             let isMounted = mountOutput.contains("/dev/\(part) ")
             let size = "---"
             
+            // =================================================================
+            // НОВОЕ: Нативно считываем уникальное имя тома (Volume Name) из файловой системы
+            // =================================================================
+            var volumeName = "EFI"
+            if let disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, part),
+               let desc = DADiskCopyDescription(disk) as? [String: Any],
+               let volName = desc[kDADiskDescriptionVolumeNameKey as String] as? String {
+                let trimmedVol = volName.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmedVol.isEmpty {
+                    volumeName = trimmedVol
+                }
+            }
+            // =================================================================
+            
             // Логика определения метки (По типу процессора)
             var partType = "EFI"
             if isAppleSilicon && !isUsb && !isThunderbolt && part == "disk0s1" {
@@ -453,8 +467,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 isMounted: isMounted,
                 size: size,
                 type: partType,
-                volumeName: "EFI"
+                volumeName: volumeName // ИСПРАВЛЕНО: Передаем реальное имя тома вместо заглушки "EFI"
             ))
+
         }
         return efiData
     }
@@ -571,7 +586,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                     
                     for disk in thunderboltDisks {
                         let status = disk.isMounted ? "🟢" : "🔴"
-                        let title = "\(status) ⚡️ \(disk.id) [\(disk.type)] (\(disk.physName))"
+                        
+                        // УМНОЕ СКРЫТИЕ: Если имя стандартное (EFI/ESP), скрываем его, иначе — выводим в кавычках
+                        let vName = disk.volumeName.uppercased()
+                        let displayVolume = (vName == "EFI" || vName == "ESP" || vName.isEmpty) ? "" : "\"\(disk.volumeName)\" "
+                        
+                        let title = "\(status) ⚡️ \(disk.id) [\(disk.type)] \(displayVolume)(\(disk.physName))"
                         let item = NSMenuItem(title: title, action: #selector(self.toggleMount(_:)), keyEquivalent: "")
                         item.representedObject = disk.id
                         item.target = self
@@ -590,7 +610,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                     
                     for disk in usbDisks {
                         let status = disk.isMounted ? "🟢" : "🔴"
-                        let title = "\(status) 🔌 \(disk.id) [\(disk.type)] (\(disk.physName))"
+                        
+                        // УМНОЕ СКРЫТИЕ: Если имя стандартное (EFI/ESP), скрываем его, иначе — выводим в кавычках
+                        let vName = disk.volumeName.uppercased()
+                        let displayVolume = (vName == "EFI" || vName == "ESP" || vName.isEmpty) ? "" : "\"\(disk.volumeName)\" "
+                        
+                        let title = "\(status) 🔌 \(disk.id) [\(disk.type)] \(displayVolume)(\(disk.physName))"
                         let item = NSMenuItem(title: title, action: #selector(self.toggleMount(_:)), keyEquivalent: "")
                         item.representedObject = disk.id
                         item.target = self
