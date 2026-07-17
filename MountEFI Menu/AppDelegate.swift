@@ -7,59 +7,97 @@ import UserNotifications
 
 class BootEFIFinder {
     static func findCurrentSystemEFI() -> String? {
+        let masterPort = mach_port_t(0)
+        // 1. Заглядываем в узел "chosen" дерева устройств Apple, который мы проверяли в ioreg
+        let chosenEntry = IORegistryEntryFromPath(masterPort, "IODeviceTree:/chosen")
+        guard chosenEntry != MACH_PORT_NULL else { return findFallbackEFI() }
+        defer { IOObjectRelease(chosenEntry) }
+        
+        // 2. Считываем сырой бинарный дамп путей загрузки (Data Blob)
+        if let bootDeviceData = IORegistryEntryCreateCFProperty(chosenEntry, "boot-device-path" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? Data {
+            
+            // Ищем UEFI-маркер GPT-раздела диска: 0x04 (Type), 0x01 (Subtype), 0x2A 0x00 (Length = 42)
+            let uefiGptMarker = Data([0x04, 0x01, 0x2A, 0x00])
+            if let range = bootDeviceData.range(of: uefiGptMarker) {
+                
+                // UUID раздела по спецификации UEFI лежит ровно через 16 байт после маркера
+                let uuidStartIndex = range.upperBound + 16
+                let uuidEndIndex = uuidStartIndex + 16
+                
+                if uuidEndIndex <= bootDeviceData.count {
+                    let uuidData = bootDeviceData.subdata(in: uuidStartIndex..<uuidEndIndex)
+                    let bytes = [UInt8](uuidData)
+                    
+                    // 3. ИСПРАВЛЕНО (LITTLE-ENDIAN): Декодируем байты в строковый UUID с правильным разворотом байт,
+                    // чтобы получить именно "0F953C51-FE0D-4FF3-A748-1FFF7E0EC043"
+                    let bootPartitionUUID = String(
+                        format: "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+                        bytes[3], bytes[2], bytes[1], bytes[0], // Первые 4 байта разворачиваются
+                        bytes[5], bytes[4],                     // Следующие 2 байта разворачиваются
+                        bytes[7], bytes[6],                     // Следующие 2 байта разворачиваются
+                        bytes[8], bytes[9],                     // Остальные байты идут по порядку (Big-Endian)
+                        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+                    ).uppercased()
+                    
+                    // 4. Через DiskArbitration ищем, какому BSD-разделу принадлежит этот UUID
+                    guard let session = DASessionCreate(kCFAllocatorDefault) else { return findFallbackEFI() }
+                    
+                    // Временно запрашиваем список всех доступных разделов в системе
+                    let appDelegate = NSApplication.shared.delegate as? AppDelegate
+                    let partitions = appDelegate?.getEfiPartitionsList() ?? []
+                    
+                    for part in partitions {
+                        if let disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, part),
+                           let desc = DADiskCopyDescription(disk) as? [String: Any],
+                           let mediaUUID = desc[kDADiskDescriptionMediaUUIDKey as String] as? String {
+                            
+                            // Если UUID системного раздела из ioreg совпал с кэшем Арбитра (это disk0s2)
+                            if mediaUUID.uppercased() == bootPartitionUUID {
+                                // Поднимаемся к "целому" физическому диску (disk0)
+                                if let wholeDisk = DADiskCopyWholeDisk(disk),
+                                   let wholeDesc = DADiskCopyDescription(wholeDisk) as? [String: Any],
+                                   let parentDiskName = wholeDesc[kDADiskDescriptionMediaBSDNameKey as String] as? String {
+                                    
+                                    // Возвращаем его первый легитимный EFI-раздел (disk0s1)
+                                    return "\(parentDiskName)s1"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return findFallbackEFI()
+    }
+    
+    // Резервный вариант через APFS Physical StoreJ
+    private static func findFallbackEFI() -> String? {
         let task = Process()
         task.launchPath = "/bin/bash"
-        // 1. Ищем Physical Store (физический родительский раздел контейнера APFS)
         task.arguments = ["-c", "/usr/sbin/diskutil info /System/Volumes/Data | /usr/bin/grep 'APFS Physical Store' | /usr/bin/awk '{print $NF}'"]
-        
         let pipe = Pipe()
         task.standardOutput = pipe
         task.launch()
         task.waitUntilExit()
-        
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        var physPartition = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        
-        // Резервный шаг: если Physical Store пустой, пробуем обычный Device Identifier
-        if physPartition.isEmpty {
-            let backupTask = Process()
-            backupTask.launchPath = "/bin/bash"
-            backupTask.arguments = ["-c", "/usr/sbin/diskutil info /System/Volumes/Data | /usr/bin/grep 'Device Identifier' | /usr/bin/awk '{print $NF}'"]
-            let backupPipe = Pipe()
-            backupTask.standardOutput = backupPipe
-            backupTask.launch()
-            backupTask.waitUntilExit()
-            let backupData = backupPipe.fileHandleForReading.readDataToEndOfFile()
-            physPartition = String(data: backupData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        }
-        
+        let physPartition = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !physPartition.isEmpty else { return nil }
-        
-        // 2. Вырезаем базовое имя НАСТОЯЩЕГО физического диска (например, из disk0s2 получаем disk0)
         let pattern = try! NSRegularExpression(pattern: "(disk\\d+)")
         let nsDisk = physPartition as NSString
         let match = pattern.firstMatch(in: physPartition, range: NSRange(location: 0, length: nsDisk.length))
         let parentDisk = match != nil ? nsDisk.substring(with: match!.range(at: 1)) : "disk0"
-        
-        // 3. Сканируем разделы РЕАЛЬНОГО физического накопителя на наличие EFI
         let listTask = Process()
         listTask.launchPath = "/bin/bash"
         listTask.arguments = ["-c", "/usr/sbin/diskutil list \(parentDisk) | /usr/bin/grep -E 'EFI|ESP' | /usr/bin/awk '{print $NF}'"]
-        
         let listPipe = Pipe()
         listTask.standardOutput = listPipe
         listTask.launch()
         listTask.waitUntilExit()
-        
         let listData = listPipe.fileHandleForReading.readDataToEndOfFile()
         if let output = String(data: listData, encoding: .utf8) {
             let parts = output.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
-            
-            // На Mac mini M4 физического EFI на диске disk0 нет, метод вернет nil и скроет пункт меню.
-            // На Intel метод вернет точный физический disk0s1 или disk1s1 (при загрузке с флешки).
             return parts.first
         }
-        
         return nil
     }
 }
