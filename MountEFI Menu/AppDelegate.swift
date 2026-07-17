@@ -2,8 +2,114 @@ import Cocoa
 import Foundation
 import UserNotifications
 
-// Модули IOKit и Darwin полностью и безопасно удалены,
-// так как вся архитектура переведена на нативный DiskArbitration и POSIX.
+// Перечисление доступных языков в приложении
+enum AppLanguage: String {
+    case russian = "ru"
+    case english = "en"
+}
+
+class LocalizationManager {
+    static let shared = LocalizationManager()
+    
+    // Ключ для сохранения настроек языка в UserDefaults
+    private let langKey = "m_selected_language"
+    
+    // Текущий активный язык приложения
+    var currentLanguage: AppLanguage = .english
+    
+    private init() {
+        // 1. Проверяем, сохранял ли пользователь язык вручную ранее (UserDefaults)
+        if let savedLang = UserDefaults.standard.string(forKey: langKey),
+           let lang = AppLanguage(rawValue: savedLang) {
+            currentLanguage = lang
+        } else {
+            // 2. СТРОГИЙ АВТОДЕТЕКТ ДЛЯ macOS 15+: Опрашиваем реальные приоритеты языков в системе
+            // Метод preferredLanguages возвращает массив кодов (например, ["ru-RU", "en-US", "de-DE"])
+            if let systemLangCode = Locale.preferredLanguages.first {
+                let lowerCode = systemLangCode.lowercased()
+                
+                // Если первый (основной) язык системы начинается на "ru", ставим русский
+                if lowerCode.hasPrefix("ru") {
+                    currentLanguage = .russian
+                } else {
+                    // Во всех остальных случаях для всего мира ставим английский по умолчанию
+                    currentLanguage = .english
+                }
+            } else {
+                // Глубокий резервный вариант, если системный массив заблокирован песочницей
+                let fallbackCode = Locale.current.identifier.lowercased()
+                currentLanguage = fallbackCode.hasPrefix("ru") ? .russian : .english
+            }
+        }
+    }
+
+    // Метод принудительного переключения языка пользователем
+    func setLanguage(_ language: AppLanguage) {
+        currentLanguage = language
+        UserDefaults.standard.set(language.rawValue, forKey: langKey)
+        UserDefaults.standard.synchronize()
+    }
+    
+    // Главный словарь переводов (Ключ строки -> [Русский, Английский])
+    func localizedString(_ key: String) -> String {
+        let translations: [String: [AppLanguage: String]] = [
+            // Секции дисков
+            "internal_disks": [.russian: "Внутренние диски", .english: "Internal Drives"],
+            "thunderbolt_disks": [.russian: "Внешние Thunderbolt", .english: "External Thunderbolt"],
+            "usb_disks": [.russian: "Внешние USB", .english: "External USB"],
+            "not_found": [.russian: "Разделы не найдены", .english: "Partitions not found"],
+            
+            // Подвал меню
+            "mount_current_efi": [.russian: "Подключить EFI текущей системы", .english: "Mount Current System EFI"],
+            "unmount_current_efi": [.russian: "Размонтировать EFI текущей системы", .english: "Unmount Current System EFI"],
+            "settings": [.russian: "⚙️ Настройки", .english: "⚙️ Settings"],
+            "quit": [.russian: "Выйти", .english: "Quit"],
+            
+            // Подменю настроек
+            "app_version": [.russian: "Версия приложения: v", .english: "App Version: v"],
+            "set_pass": [.russian: "🔑 Задать пароль администратора", .english: "🔑 Set Administrator Password"],
+            "remove_pass": [.russian: "🔒 Удалить пароль администратора", .english: "🔒 Remove Administrator Password"],
+            "check_updates": [.russian: "🔄 Проверить обновления...", .english: "🔄 Check for Updates..."],
+            "select_lang": [.russian: "🌐 Выбор языка / Language", .english: "🌐 Language / Выбор языка"],
+            
+            // Окна алертов и уведомлений
+            "pass_title": [.russian: "Настройка пароля", .english: "Password Setup"],
+            "pass_info": [.russian: "Введите пароль администратора этого Mac для быстрого монтирования дисков.", .english: "Enter the administrator password of this Mac for fast disk mounting."],
+            "save": [.russian: "Сохранить", .english: "Save"],
+            "cancel": [.russian: "Отмена", .english: "Cancel"],
+            "pass_saved_notif": [.russian: "Пароль проверен и сохранен!", .english: "Password verified and saved!"],
+            "pass_removed_notif": [.russian: "Пароль успешно удален", .english: "Password successfully removed"],
+            "auth_error_title": [.russian: "Ошибка авторизации", .english: "Authorization Error"],
+            "auth_error_info": [.russian: "Введенный пароль не является валидным паролем администратора для этого Mac. Попробуйте еще раз.", .english: "The entered password is not a valid administrator password for this Mac. Please try again."],
+            
+            // Статусы монтирования в уведомлениях
+            "notif_title": [.russian: "MountEFI Menu", .english: "MountEFI Menu"],
+            "disk_connected": [.russian: "Подключен %@ накопитель: Обнаружен %@ (%@)", .english: "%@ drive connected: Detected %@ (%@)"],
+            "unmount_success": [.russian: "Раздел %@ успешно размонтирован", .english: "Partition %@ successfully unmounted"],
+            "unmount_force": [.russian: "Раздел %@ принудительно отключен с помощью Force", .english: "Partition %@ forcefully unmounted via Force"],
+            "unmount_error": [.russian: "Не удалось размонтировать %@ даже принудительно", .english: "Failed to unmount %@ even with force"],
+            "mount_success": [.russian: "Раздел %@ успешно смонтирован", .english: "Partition %@ successfully mounted"],
+            "mount_error": [.russian: "Не удалось смонтировать %@", .english: "Failed to mount %@"],
+            
+            // Окна апдейтера
+            "upd_title": [.russian: "Доступно обновление", .english: "Update Available"],
+            "upd_info": [.russian: "Доступна новая версия MountEFI Menu: v%@. Желаете обновиться?", .english: "A new version of MountEFI Menu is available: v%@. Would you like to update?"],
+            "upd_download": [.russian: "Скачать и обновить", .english: "Download and Update"],
+            "upd_later": [.russian: "Позже", .english: "Later"],
+            "upd_not_needed_title": [.russian: "Обновление не требуется", .english: "No Update Needed"],
+            "upd_not_needed_info": [.russian: "У вас установлена самая свежая версия v%@.", .english: "You have the latest version v%@ installed."]
+        ]
+        
+        return translations[key]?[currentLanguage] ?? key
+    }
+}
+
+// Удобное глобальное расширение для компактного вызова локализации: "key".localized
+extension String {
+    var localized: String {
+        return LocalizationManager.shared.localizedString(self)
+    }
+}
 
 class BootEFIFinder {
     static func findCurrentSystemEFI() -> String? {
@@ -150,7 +256,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             
             UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
                 if let error = error {
-                    print("Ошибка запроса прав на уведомления: \(error)")
+                    // Переведено на технический английский язык для консоли Xcode
+                    print("Notification authorization request error: \(error)")
                 }
             }
         }
@@ -395,12 +502,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 for disk in disks {
                     if (disk.isUsb || disk.isThunderbolt) && !self.knownDiskIds.contains(disk.id) {
                         let typeStr = disk.isThunderbolt ? "Thunderbolt" : "USB"
+                        
+                        // ИСПРАВЛЕНО ДЛЯ ЛОКАЛИЗАЦИИ: Динамически собираем строку по правилам выбранного языка
+                        let localizedText = String(format: "disk_connected".localized, typeStr, disk.id, disk.physName)
+                        
                         self.showNotification(
-                            title: "MountEFI Menu",
-                            text: "Подключен \(typeStr) накопитель: Обнаружен \(disk.id) (\(disk.physName))"
+                            title: "notif_title".localized,
+                            text: localizedText
                         )
                     }
                 }
+
                 
                 if currentCount != self.lastDisksCount || mountStatusChanged || self.needsRefresh {
                     self.lastDisksCount = currentCount
@@ -424,7 +536,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             self.needsRefresh = false
             
             if disks.isEmpty {
-                let emptyItem = NSMenuItem(title: "Разделы не найдены", action: nil, keyEquivalent: "")
+                let emptyItem = NSMenuItem(title: "not_found".localized, action: nil, keyEquivalent: "")
                 emptyItem.isEnabled = false
                 self.statusMenu.addItem(emptyItem)
             } else {
@@ -434,7 +546,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 
                 // 1. СЕКЦИЯ: Внутренние диски
                 if !internalDisks.isEmpty {
-                    let header = NSMenuItem(title: "Внутренние диски", action: nil, keyEquivalent: "")
+                    let header = NSMenuItem(title: "internal_disks".localized, action: nil, keyEquivalent: "")
                     header.isEnabled = false
                     self.statusMenu.addItem(header)
                     
@@ -453,7 +565,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                     if !internalDisks.isEmpty {
                         self.statusMenu.addItem(NSMenuItem.separator())
                     }
-                    let header = NSMenuItem(title: "Внешние Thunderbolt", action: nil, keyEquivalent: "")
+                    let header = NSMenuItem(title: "thunderbolt_disks".localized, action: nil, keyEquivalent: "")
                     header.isEnabled = false
                     self.statusMenu.addItem(header)
                     
@@ -472,7 +584,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                     if !internalDisks.isEmpty || !thunderboltDisks.isEmpty {
                         self.statusMenu.addItem(NSMenuItem.separator())
                     }
-                    let header = NSMenuItem(title: "Внешние USB", action: nil, keyEquivalent: "")
+                    let header = NSMenuItem(title: "usb_disks".localized, action: nil, keyEquivalent: "")
                     header.isEnabled = false
                     self.statusMenu.addItem(header)
                     
@@ -492,18 +604,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             // =================================================================
             self.statusMenu.addItem(NSMenuItem.separator())
             
-            // 1. Кнопка быстрого EFI текущей системы (в строгом стиле без скобок и кружков)
+            // 1. Кнопка быстрого EFI текущей системы
             if let bootEFI = self.systemEFIDisk {
                 let systemDiskInfo = disks.first { $0.id == bootEFI }
                 let isMounted = systemDiskInfo?.isMounted ?? false
-                let actionText = isMounted ? "Размонтировать" : "Подключить"
+                
+                // Динамически переводим глагол "Подключить / Размонтировать"
+                let actionKey = isMounted ? "unmount_current_efi" : "mount_current_efi"
                 
                 let bootEfiItem = NSMenuItem(
-                    title: "💻 \(actionText) EFI текущей системы",
+                    title: "💻 \(actionKey.localized)",
                     action: #selector(self.mountCurrentSystemEFI(_:)),
                     keyEquivalent: "e"
                 )
-                // КРИТИЧЕСКИ ВАЖНО: Привязываем ID диска к его target/representedObject для точного перенаправления клика
                 bootEfiItem.representedObject = bootEFI
                 bootEfiItem.target = self
                 
@@ -511,26 +624,50 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 self.statusMenu.addItem(NSMenuItem.separator())
             }
             
-            // 2. Создаем пункт «Настройки» с боковым подменю
-            let settingsItem = NSMenuItem(title: "⚙️ Настройки", action: nil, keyEquivalent: "")
+            // 2. Создаем главный пункт «⚙️ Настройки» с боковым подменю
+            let settingsItem = NSMenuItem(title: "settings".localized, action: nil, keyEquivalent: "")
             let submenu = NSMenu()
             
             let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
-            let versionItem = NSMenuItem(title: "Версия приложения: v\(currentVersion)", action: nil, keyEquivalent: "")
+            let versionItem = NSMenuItem(title: "\("app_version".localized)\(currentVersion)", action: nil, keyEquivalent: "")
             versionItem.isEnabled = false
             submenu.addItem(versionItem)
             
             submenu.addItem(NSMenuItem.separator())
             
+            // Пароль администратора
             let hasPassword = FileManager.default.fileExists(atPath: self.confPath)
-            let passTitle = hasPassword ? "🔒 Удалить пароль администратора" : "🔑 Задать пароль администратора"
+            let passTitle = hasPassword ? "remove_pass".localized : "set_pass".localized
             let passItem = NSMenuItem(title: passTitle, action: #selector(self.handlePasswordButton(_:)), keyEquivalent: "")
             passItem.target = self
             submenu.addItem(passItem)
             
             submenu.addItem(NSMenuItem.separator())
             
-            let updateItem = NSMenuItem(title: "🔄 Проверить обновления...", action: #selector(self.manualUpdateCheck), keyEquivalent: "")
+            // --- НОВОЕ: ВЛОЖЕННОЕ МЕНЮ ВЫБОРА ЯЗЫКА ---
+            let langMenuItem = NSMenuItem(title: "select_lang".localized, action: nil, keyEquivalent: "")
+            let langSubmenu = NSMenu()
+            
+            // Пункт "Русский"
+            let ruItem = NSMenuItem(title: "Русский", action: #selector(self.changeLanguageToRussian), keyEquivalent: "")
+            ruItem.target = self
+            ruItem.state = LocalizationManager.shared.currentLanguage == .russian ? .on : .off // Ставим галочку
+            langSubmenu.addItem(ruItem)
+            
+            // Пункт "English"
+            let enItem = NSMenuItem(title: "English", action: #selector(self.changeLanguageToEnglish), keyEquivalent: "")
+            enItem.target = self
+            enItem.state = LocalizationManager.shared.currentLanguage == .english ? .on : .off // Ставим галочку
+            langSubmenu.addItem(enItem)
+            
+            langMenuItem.submenu = langSubmenu
+            submenu.addItem(langMenuItem)
+            // ------------------------------------------
+            
+            submenu.addItem(NSMenuItem.separator())
+            
+            // Проверить обновления
+            let updateItem = NSMenuItem(title: "check_updates".localized, action: #selector(self.manualUpdateCheck), keyEquivalent: "")
             updateItem.target = self
             submenu.addItem(updateItem)
             
@@ -539,7 +676,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             
             // 3. Кнопка Выхода
             self.statusMenu.addItem(NSMenuItem.separator())
-            let quitItem = NSMenuItem(title: "Выйти", action: #selector(self.forceQuitApp), keyEquivalent: "q")
+            let quitItem = NSMenuItem(title: "quit".localized, action: #selector(self.forceQuitApp), keyEquivalent: "q")
             quitItem.target = self
             self.statusMenu.addItem(quitItem)
         }
@@ -554,22 +691,28 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         }
         return nil
     }
+    
+    
     @objc func handlePasswordButton(_ sender: NSMenuItem) {
-        // Проверяем реальное наличие plist-файла на диске
         if FileManager.default.fileExists(atPath: confPath) {
             try? FileManager.default.removeItem(atPath: confPath)
-            showNotification(title: "Связка ключей", text: "Пароль успешно удален")
+            showNotification(title: "notif_title".localized, text: "pass_removed_notif".localized)
+            
+            // ИСПРАВЛЕНО: Принудительно обновляем меню на главном потоке, чтобы кнопка мгновенно сменилась на "Задать пароль"
+            DispatchQueue.main.async {
+                self.needsRefresh = true
+                self.asyncHotplugMonitor()
+            }
         } else {
             let alert = NSAlert()
-            alert.messageText = "Настройка пароля"
-            alert.informativeText = "Введите пароль администратора этого Mac для быстрого монтирования дисков."
-            alert.addButton(withTitle: "Сохранить")
-            alert.addButton(withTitle: "Отмена")
+            alert.messageText = "pass_title".localized
+            alert.informativeText = "pass_info".localized
+            alert.addButton(withTitle: "save".localized)
+            alert.addButton(withTitle: "cancel".localized)
             
             let inputTextField = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
             alert.accessoryView = inputTextField
             
-            // ФОКУС ВВОДА: Без if let, так как alert.window не опционал в актуальном SDK
             let alertWindow = alert.window
             alertWindow.makeKeyAndOrderFront(nil)
             alertWindow.initialFirstResponder = inputTextField
@@ -578,7 +721,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 let password = inputTextField.stringValue
                 
                 if !password.isEmpty {
-                    // ВАЛИДАЦИЯ: Проверяем пароль через тестовый вызов sudo в фоне
                     let checkTask = Process()
                     checkTask.launchPath = "/bin/bash"
                     checkTask.arguments = ["-c", "sudo -k && echo '\(password)' | sudo -S true"]
@@ -592,20 +734,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                         let base64Str = Data(password.utf8).base64EncodedString()
                         let dict: NSDictionary = ["m_pass": base64Str]
                         dict.write(toFile: confPath, atomically: true)
-                        showNotification(title: "Успешно", text: "Пароль проверен и сохранен!")
+                        showNotification(title: "notif_title".localized, text: "pass_saved_notif".localized)
                     } else {
                         let errorAlert = NSAlert()
-                        errorAlert.messageText = "Ошибка авторизации"
-                        errorAlert.informativeText = "Введенный пароль не является валидным паролем администратора для этого Mac. Попробуйте еще раз."
+                        errorAlert.messageText = "auth_error_title".localized
+                        errorAlert.informativeText = "auth_error_info".localized
                         errorAlert.addButton(withTitle: "ОК")
                         errorAlert.runModal()
                     }
                 }
             }
+            
+            // ИСПРАВЛЕНО: Принудительно обновляем меню на главном потоке после закрытия окна ввода
+            DispatchQueue.main.async {
+                self.needsRefresh = true
+                self.asyncHotplugMonitor()
+            }
         }
-        self.needsRefresh = true
-        self.asyncHotplugMonitor()
     }
+
 
     @objc func toggleMount(_ sender: NSMenuItem) {
         // Извлекаем строку ID диска напрямую из привязанного representedObject нажатого пункта
@@ -660,9 +807,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 
                 DispatchQueue.main.async {
                     if success {
-                        self.showNotification(title: "MountEFI Menu", text: forced ? "Раздел \(diskId) принудительно отключен (Force)" : "Раздел \(diskId) успешно размонтирован")
+                        let text = String(format: forced ? "unmount_force".localized : "unmount_success".localized, diskId)
+                        self.showNotification(title: "notif_title".localized, text: text)
                     } else {
-                        self.showNotification(title: "Ошибка", text: "Не удалось размонтировать \(diskId)")
+                        let text = String(format: "unmount_error".localized, diskId)
+                        self.showNotification(title: "notif_title".localized, text: text)
                     }
                     self.needsRefresh = true
                     self.asyncHotplugMonitor()
@@ -687,9 +836,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 
                 DispatchQueue.main.async {
                     if task.terminationStatus == 0 {
-                        self.showNotification(title: "MountEFI Menu", text: "Раздел \(diskId) успешно смонтирован")
+                        let text = String(format: "mount_success".localized, diskId)
+                        self.showNotification(title: "notif_title".localized, text: text)
                     } else {
-                        self.showNotification(title: "Ошибка", text: "Не удалось смонтировать \(diskId)")
+                        let text = String(format: "mount_error".localized, diskId)
+                        self.showNotification(title: "notif_title".localized, text: text)
                     }
                     self.needsRefresh = true
                     self.asyncHotplugMonitor()
@@ -714,6 +865,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             }
         }
     }
+    
+    @objc func changeLanguageToRussian() {
+        LocalizationManager.shared.setLanguage(.russian)
+        self.refreshMenu() // Перерисовываем интерфейс с новыми строками "на лету"
+    }
+
+    @objc func changeLanguageToEnglish() {
+        LocalizationManager.shared.setLanguage(.english)
+        self.refreshMenu() // Перерисовываем интерфейс с новыми строками "на лету"
+    }
+
     
     @objc func manualUpdateCheck() {
         AppUpdater.checkForUpdates(silent: false)
@@ -746,8 +908,8 @@ class AppUpdater {
                     } else if !silent {
                         DispatchQueue.main.async {
                             let alert = NSAlert()
-                            alert.messageText = "Обновление не требуется"
-                            alert.informativeText = "У вас установлена самая свежая версия v\(currentVersion)."
+                            alert.messageText = "upd_not_needed_title".localized
+                            alert.informativeText = String(format: "upd_not_needed_info".localized, currentVersion)
                             alert.runModal()
                         }
                     }
@@ -759,11 +921,11 @@ class AppUpdater {
     
     private static func showUpdateAlert(version: String, url: URL) {
         let alert = NSAlert()
-        alert.messageText = "Доступно обновление"
-        alert.informativeText = "Доступна новая версия MountEFI Menu: v\(version). Желаете обновиться?"
-        alert.addButton(withTitle: "Скачать и обновить")
-        alert.addButton(withTitle: "Позже")
-        
+        alert.messageText = "upd_title".localized
+        alert.informativeText = String(format: "upd_info".localized, version)
+        alert.buttons[0].title = "upd_download".localized
+        alert.buttons[1].title = "upd_later".localized
+
         if alert.runModal() == .alertFirstButtonReturn {
             NSWorkspace.shared.open(url)
             NSApplication.shared.terminate(nil)
