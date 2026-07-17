@@ -53,6 +53,14 @@ class LocalizationManager {
     // Главный словарь переводов (Ключ строки -> [Русский, Английский])
     func localizedString(_ key: String) -> String {
         let translations: [String: [AppLanguage: String]] = [
+            "eject_whole": [.russian: "Извлечь весь накопитель", .english: "Eject Whole Drive"],
+            "eject_success_notif": [.russian: "Накопитель %@ успешно отключен и готов к безопасному извлечению.", .english: "Drive %@ has been successfully disconnected and is ready for safe removal."],
+            "force_eject_title": [.russian: "Диск занят", .english: "Disk is Busy"],
+            "force_eject_info": [.russian: "Некоторые разделы накопителя %@ используются другими программами. Отключить его принудительно?", .english: "Some partitions on drive %@ are currently in use by other applications. Force disconnection?"],
+            "force_button": [.russian: "Принудительно", .english: "Force Eject"],
+            "cancel_button": [.russian: "Отмена", .english: "Cancel"],
+            "eject_error_notif": [.russian: "Не удалось отключить накопитель %@. Закройте использующие его программы.", .english: "Failed to disconnect drive %@. Please close any programs using it."],
+
             // Секции дисков
             "internal_disks": [.russian: "Внутренние диски", .english: "Internal Drives"],
             "thunderbolt_disks": [.russian: "Внешние Thunderbolt", .english: "External Thunderbolt"],
@@ -98,6 +106,7 @@ class LocalizationManager {
             "upd_later": [.russian: "Позже", .english: "Later"],
             "upd_not_needed_title": [.russian: "Обновление не требуется", .english: "No Update Needed"],
             "upd_not_needed_info": [.russian: "У вас установлена самая свежая версия v%@.", .english: "You have the latest version v%@ installed."]
+            
         ]
         
         return translations[key]?[currentLanguage] ?? key
@@ -209,7 +218,6 @@ class BootEFIFinder {
 }
 
 
-
 @main
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemValidation {
 
@@ -228,7 +236,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
     // Путь к файлу зашифрованного пароля администратора
     let confPath = (NSHomeDirectory() as NSString).appendingPathComponent(".MountEFImenu.plist")
 
-    // Структура диска со всеми флагами интерфейсов (USB / Thunderbolt)
+    // Структура диска со всеми флагами интерфейсов
     struct EfiDisk {
         let id: String
         let physName: String
@@ -237,7 +245,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         let isMounted: Bool
         let size: String
         let type: String
-        let volumeName: String
+        let volumeName: String // Оставляем только имя тома в кавычках
     }
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
@@ -327,8 +335,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         return []
     }
 
-
-
     func getEfiDisks() -> [EfiDisk] {
         let partitions = getEfiPartitionsList()
         var efiData: [EfiDisk] = []
@@ -344,16 +350,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         if sizeType > 0 {
             var arm64Supported = 0
             sysctlbyname("hw.optional.arm64", &arm64Supported, &sizeType, nil, 0)
-            if arm64Supported == 1 {
-                isAppleSilicon = true
-            }
+            if arm64Supported == 1 { isAppleSilicon = true }
         }
         
         for part in partitions {
             var physName = "Internal Drive"
             var isUsb = false
             var isThunderbolt = false
-            var isVirtualImage = false // Новый флаг-фильтр для виртуальных DMG
+            var isVirtualImage = false
             
             if let disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, part) {
                 // СТРОГАЯ ЗАЩИТА: Безопасный пропуск диска, если он стирается или недоступен
@@ -362,74 +366,47 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 if let wholeDisk = DADiskCopyWholeDisk(disk),
                    let wholeDesc = DADiskCopyDescription(wholeDisk) as? [String: Any] {
                     
-                    // =================================================================
-                    // СТРОГИЙ НАТИВНЫЙ ФИЛЬТР ВИРТУАЛЬНЫХ ОБРАЗОВ (Apple Disk Image)
-                    // =================================================================
+                    // ФИЛЬТР ВИРТУАЛЬНЫХ ОБРАЗОВ
                     if let modelName = wholeDesc[kDADiskDescriptionDeviceModelKey as String] as? String {
                         let modelUpper = modelName.uppercased()
-                        if modelUpper.contains("DISK IMAGE") || modelUpper.contains("VIRTUAL") {
-                            isVirtualImage = true
-                        }
+                        if modelUpper.contains("DISK IMAGE") || modelUpper.contains("VIRTUAL") { isVirtualImage = true }
                     }
-                    
                     if let protocolName = wholeDesc[kDADiskDescriptionDeviceProtocolKey as String] as? String {
                         let protoUpper = protocolName.uppercased()
-                        if protoUpper.contains("VIRTUAL") || protoUpper.contains("IMAGE") {
-                            isVirtualImage = true
-                        }
+                        if protoUpper.contains("VIRTUAL") || protoUpper.contains("IMAGE") { isVirtualImage = true }
                     }
-                    
-                    // Если это скрытый образ iOS симулятора или RAM-диск — отсекаем по имени медиа
                     if let mediaName = wholeDesc[kDADiskDescriptionMediaNameKey as String] as? String {
                         let mediaUpper = mediaName.uppercased()
-                        if mediaUpper.contains("DISK IMAGE") || mediaUpper.contains("VIRTUAL") {
-                            isVirtualImage = true
-                        }
+                        if mediaUpper.contains("DISK IMAGE") || mediaUpper.contains("VIRTUAL") { isVirtualImage = true }
                     }
-                    // =================================================================
                     
-                    // Чтение коммерческого названия модели устройства
+                    // Чтение коммерческого названия модели
                     if let modelName = wholeDesc[kDADiskDescriptionDeviceModelKey as String] as? String {
                         let trimmed = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !trimmed.isEmpty && trimmed != "Internal Drive" {
-                            physName = trimmed
-                        }
+                        if !trimmed.isEmpty && trimmed != "Internal Drive" { physName = trimmed }
                     }
-                    
                     if physName.isEmpty || physName.count < 5,
                        let mediaName = wholeDesc[kDADiskDescriptionMediaNameKey as String] as? String {
                         let trimmed = mediaName.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !trimmed.isEmpty && trimmed != "Internal Drive" && !trimmed.contains("Partition") && !trimmed.contains("Container") {
-                            physName = trimmed
-                        }
+                        if !trimmed.isEmpty && trimmed != "Internal Drive" && !trimmed.contains("Partition") && !trimmed.contains("Container") { physName = trimmed }
                     }
-                    
-                    // Приклеиваем имя вендора (Samsung, SanDisk)
                     if let vendorName = wholeDesc[kDADiskDescriptionDeviceVendorKey as String] as? String {
                         let vendorTrimmed = vendorName.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !vendorTrimmed.isEmpty && !physName.contains(vendorTrimmed) && vendorTrimmed != "Apple" {
-                            physName = "\(vendorTrimmed) \(physName)"
-                        }
+                        if !vendorTrimmed.isEmpty && !physName.contains(vendorTrimmed) && vendorTrimmed != "Apple" { physName = "\(vendorTrimmed) \(physName)" }
                     }
                     
-                    // Определяем протоколы шины подключения (USB / Thunderbolt)
+                    // Определяем протоколы (USB/Thunderbolt)
                     if let protocolName = wholeDesc[kDADiskDescriptionDeviceProtocolKey as String] as? String {
                         let protoUpper = protocolName.uppercased()
-                        if protoUpper.contains("USB") {
-                            isUsb = true
-                        } else if protoUpper.contains("PCI") || protoUpper.contains("NVME") || protoUpper.contains("THUNDERBOLT") {
-                            if let isInternalNum = wholeDesc[kDADiskDescriptionDeviceInternalKey as String] as? Bool, !isInternalNum {
-                                isThunderbolt = true
-                            }
+                        if protoUpper.contains("USB") { isUsb = true }
+                        else if protoUpper.contains("PCI") || protoUpper.contains("NVME") || protoUpper.contains("THUNDERBOLT") {
+                            if let isInternalNum = wholeDesc[kDADiskDescriptionDeviceInternalKey as String] as? Bool, !isInternalNum { isThunderbolt = true }
                         }
                     }
                 }
             }
             
-            // КРИТИЧЕСКИЙ ШАГ: Если фильтр сработал — тихо выбрасываем диск из цикла, не засоряя меню
-            if isVirtualImage {
-                continue
-            }
+            if isVirtualImage { continue }
             
             if physName.isEmpty || physName == "Internal Drive" || physName == "Media" {
                 if isThunderbolt { physName = "Thunderbolt NVMe" }
@@ -439,25 +416,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             let isMounted = mountOutput.contains("/dev/\(part) ")
             let size = "---"
             
-            // =================================================================
-            // НОВОЕ: Нативно считываем уникальное имя тома (Volume Name) из файловой системы
-            // =================================================================
+            // Нативно считываем уникальное имя тома
             var volumeName = "EFI"
             if let disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, part),
                let desc = DADiskCopyDescription(disk) as? [String: Any],
                let volName = desc[kDADiskDescriptionVolumeNameKey as String] as? String {
                 let trimmedVol = volName.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmedVol.isEmpty {
-                    volumeName = trimmedVol
-                }
+                if !trimmedVol.isEmpty { volumeName = trimmedVol }
             }
-            // =================================================================
             
-            // Логика определения метки (По типу процессора)
             var partType = "EFI"
-            if isAppleSilicon && !isUsb && !isThunderbolt && part == "disk0s1" {
-                partType = "ISC"
-            }
+            if isAppleSilicon && !isUsb && !isThunderbolt && part == "disk0s1" { partType = "ISC" }
             
             efiData.append(EfiDisk(
                 id: part,
@@ -467,13 +436,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 isMounted: isMounted,
                 size: size,
                 type: partType,
-                volumeName: volumeName // ИСПРАВЛЕНО: Передаем реальное имя тома вместо заглушки "EFI"
+                volumeName: volumeName
             ))
-
         }
         return efiData
     }
-
 
     func runShell(_ command: String) -> String {
         let task = Process()
@@ -586,8 +553,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                     
                     for disk in thunderboltDisks {
                         let status = disk.isMounted ? "🟢" : "🔴"
-                        
-                        // УМНОЕ СКРЫТИЕ: Если имя стандартное (EFI/ESP), скрываем его, иначе — выводим в кавычках
                         let vName = disk.volumeName.uppercased()
                         let displayVolume = (vName == "EFI" || vName == "ESP" || vName.isEmpty) ? "" : "\"\(disk.volumeName)\" "
                         
@@ -595,6 +560,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                         let item = NSMenuItem(title: title, action: #selector(self.toggleMount(_:)), keyEquivalent: "")
                         item.representedObject = disk.id
                         item.target = self
+                        
+                        // НОВОЕ: Если EFI раздел смонтирован, создаем боковое подменю полного извлечения
+                        if disk.isMounted {
+                            let diskSubmenu = NSMenu()
+                            let ejectAllItem = NSMenuItem(
+                                title: "⏏️ \("eject_whole".localized)",
+                                action: #selector(self.ejectWholeDisk(_:)),
+                                keyEquivalent: ""
+                            )
+                            ejectAllItem.representedObject = disk.id
+                            ejectAllItem.target = self
+                            diskSubmenu.addItem(ejectAllItem)
+                            item.submenu = diskSubmenu
+                        }
+                        
                         self.statusMenu.addItem(item)
                     }
                 }
@@ -610,8 +590,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                     
                     for disk in usbDisks {
                         let status = disk.isMounted ? "🟢" : "🔴"
-                        
-                        // УМНОЕ СКРЫТИЕ: Если имя стандартное (EFI/ESP), скрываем его, иначе — выводим в кавычках
                         let vName = disk.volumeName.uppercased()
                         let displayVolume = (vName == "EFI" || vName == "ESP" || vName.isEmpty) ? "" : "\"\(disk.volumeName)\" "
                         
@@ -619,9 +597,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                         let item = NSMenuItem(title: title, action: #selector(self.toggleMount(_:)), keyEquivalent: "")
                         item.representedObject = disk.id
                         item.target = self
+                        
+                        // НОВОЕ: Если EFI раздел смонтирован, создаем боковое подменю полного извлечения
+                        if disk.isMounted {
+                            let diskSubmenu = NSMenu()
+                            let ejectAllItem = NSMenuItem(
+                                title: "⏏️ \("eject_whole".localized)",
+                                action: #selector(self.ejectWholeDisk(_:)),
+                                keyEquivalent: ""
+                            )
+                            ejectAllItem.representedObject = disk.id
+                            ejectAllItem.target = self
+                            diskSubmenu.addItem(ejectAllItem)
+                            item.submenu = diskSubmenu
+                        }
+                        
                         self.statusMenu.addItem(item)
                     }
                 }
+
             }
             
             // =================================================================
@@ -891,6 +885,83 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         }
     }
     
+    @objc func ejectWholeDisk(_ sender: NSMenuItem) {
+        guard let partitionId = sender.representedObject as? String else { return }
+        let password = self.getStoredPassword()
+        
+        // Автоматически вырезаем имя базового физического диска (из disk3s1 получаем disk3)
+        let pattern = try! NSRegularExpression(pattern: "(disk\\d+)")
+        let nsDisk = partitionId as NSString
+        let match = pattern.firstMatch(in: partitionId, range: NSRange(location: 0, length: nsDisk.length))
+        let targetDisk = match != nil ? nsDisk.substring(with: match!.range(at: 1)) : partitionId
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            let task = Process()
+            task.launchPath = "/bin/bash"
+            
+            if let pwd = password {
+                task.arguments = ["-c", "echo '\(pwd)' | sudo -S /usr/sbin/diskutil unmountDisk \(targetDisk)"]
+            } else {
+                task.arguments = ["-c", "osascript -e 'do shell script \"/usr/sbin/diskutil unmountDisk \(targetDisk)\" with administrator privileges'"]
+            }
+            task.launch()
+            task.waitUntilExit()
+            
+            let isCleanSuccess = (task.terminationStatus == 0)
+            
+            if isCleanSuccess {
+                // А. Сценарий: Диск успешно и чисто отключился сразу
+                DispatchQueue.main.async {
+                    let text = String(format: "eject_success_notif".localized, targetDisk)
+                    self.showNotification(title: "notif_title".localized, text: text)
+                    self.needsRefresh = true
+                    self.asyncHotplugMonitor()
+                }
+            } else {
+                // Б. Сценарий: Диск занят процессами. Выводим системное окно Force Eject
+                DispatchQueue.main.async {
+                    let alert = NSAlert()
+                    alert.messageText = "force_eject_title".localized
+                    alert.informativeText = String(format: "force_eject_info".localized, targetDisk)
+                    alert.addButton(withTitle: "force_button".localized)
+                    alert.addButton(withTitle: "cancel_button".localized)
+                    
+                    // Если пользователь нажал кнопку "Принудительно"
+                    if alert.runModal() == .alertFirstButtonReturn {
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            let forceTask = Process()
+                            forceTask.launchPath = "/bin/bash"
+                            
+                            // Посылаем unmountDisk force для жесткого закрытия всех хвостов системы
+                            if let pwd = password {
+                                forceTask.arguments = ["-c", "echo '\(pwd)' | sudo -S /usr/sbin/diskutil unmountDisk force \(targetDisk)"]
+                            } else {
+                                forceTask.arguments = ["-c", "osascript -e 'do shell script \"/usr/sbin/diskutil unmountDisk force \(targetDisk)\" with administrator privileges'"]
+                            }
+                            forceTask.launch()
+                            forceTask.waitUntilExit()
+                            
+                            let isForceSuccess = (forceTask.terminationStatus == 0)
+                            
+                            DispatchQueue.main.async {
+                                if isForceSuccess {
+                                    let text = String(format: "eject_success_notif".localized, targetDisk)
+                                    self.showNotification(title: "notif_title".localized, text: text)
+                                } else {
+                                    let text = String(format: "eject_error_notif".localized, targetDisk)
+                                    self.showNotification(title: "notif_title".localized, text: text)
+                                }
+                                self.needsRefresh = true
+                                self.asyncHotplugMonitor()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    
     @objc func changeLanguageToRussian() {
         LocalizationManager.shared.setLanguage(.russian)
         self.refreshMenu() // Перерисовываем интерфейс с новыми строками "на лету"
@@ -905,10 +976,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
     @objc func manualUpdateCheck() {
         AppUpdater.checkForUpdates(silent: false)
     }
-} // <--- ЗДЕСЬ ОКОНЧАТЕЛЬНО ЗАКРЫВАЕТСЯ ВАШ КЛАСС APPDELEGATE
+} // <--- ЗДЕСЬ ОКОНЧАТЕЛЬНО ЗАКРЫВАЕТСЯ КЛАСС APPDELEGATE
 
 // =================================================================
-// КЛАСС АВТООБНОВЛЕНИЯ (РАЗМЕЩАЕТСЯ ОТДЕЛЬНО В КОНЦЕ ФАЙЛА)
+// КЛАСС АВТООБНОВЛЕНИЯ
 // =================================================================
 class AppUpdater {
     // RAW-ссылка на ваш json-манифест в репозитории GitHub
