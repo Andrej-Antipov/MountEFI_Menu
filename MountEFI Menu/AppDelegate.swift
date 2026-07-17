@@ -7,23 +7,41 @@ import UserNotifications
 
 class BootEFIFinder {
     static func findCurrentSystemEFI() -> String? {
-        var stats = statfs()
-        guard statfs("/", &stats) == 0 else { return nil }
+        let task = Process()
+        task.launchPath = "/bin/bash"
+        // 1. Ищем Physical Store (физический родительский раздел контейнера APFS)
+        task.arguments = ["-c", "/usr/sbin/diskutil info /System/Volumes/Data | /usr/bin/grep 'APFS Physical Store' | /usr/bin/awk '{print $NF}'"]
         
-        let bootPartitionBSD = withUnsafePointer(to: &stats.f_mntfromname) {
-            $0.withMemoryRebound(to: CChar.self, capacity: Int(MNAMELEN)) { String(cString: $0) }
-        }.replacingOccurrences(of: "/dev/", with: "")
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.launch()
+        task.waitUntilExit()
         
-        guard !bootPartitionBSD.isEmpty else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        var physPartition = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         
-        // Находим родительский физический диск (whole disk) для текущей запущенной ОС
-        guard let session = DASessionCreate(kCFAllocatorDefault),
-              let disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, bootPartitionBSD),
-              let wholeDisk = DADiskCopyWholeDisk(disk),
-              let wholeDesc = DADiskCopyDescription(wholeDisk) as? [String: Any],
-              let parentDisk = wholeDesc[kDADiskDescriptionMediaBSDNameKey as String] as? String else { return nil }
+        // Резервный шаг: если Physical Store пустой, пробуем обычный Device Identifier
+        if physPartition.isEmpty {
+            let backupTask = Process()
+            backupTask.launchPath = "/bin/bash"
+            backupTask.arguments = ["-c", "/usr/sbin/diskutil info /System/Volumes/Data | /usr/bin/grep 'Device Identifier' | /usr/bin/awk '{print $NF}'"]
+            let backupPipe = Pipe()
+            backupTask.standardOutput = backupPipe
+            backupTask.launch()
+            backupTask.waitUntilExit()
+            let backupData = backupPipe.fileHandleForReading.readDataToEndOfFile()
+            physPartition = String(data: backupData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        }
         
-        // Быстрый вызов для Intel: вытаскиваем легитимный EFI-раздел родительского диска
+        guard !physPartition.isEmpty else { return nil }
+        
+        // 2. Вырезаем базовое имя НАСТОЯЩЕГО физического диска (например, из disk0s2 получаем disk0)
+        let pattern = try! NSRegularExpression(pattern: "(disk\\d+)")
+        let nsDisk = physPartition as NSString
+        let match = pattern.firstMatch(in: physPartition, range: NSRange(location: 0, length: nsDisk.length))
+        let parentDisk = match != nil ? nsDisk.substring(with: match!.range(at: 1)) : "disk0"
+        
+        // 3. Сканируем разделы РЕАЛЬНОГО физического накопителя на наличие EFI
         let listTask = Process()
         listTask.launchPath = "/bin/bash"
         listTask.arguments = ["-c", "/usr/sbin/diskutil list \(parentDisk) | /usr/bin/grep -E 'EFI|ESP' | /usr/bin/awk '{print $NF}'"]
@@ -36,12 +54,17 @@ class BootEFIFinder {
         let listData = listPipe.fileHandleForReading.readDataToEndOfFile()
         if let output = String(data: listData, encoding: .utf8) {
             let parts = output.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
-            return parts.first // На Intel гарантированно вернет diskXs1 (например, disk2s1)
+            
+            // На Mac mini M4 физического EFI на диске disk0 нет, метод вернет nil и скроет пункт меню.
+            // На Intel метод вернет точный физический disk0s1 или disk1s1 (при загрузке с флешки).
+            return parts.first
         }
         
         return nil
     }
 }
+
+
 
 @main
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemValidation {
