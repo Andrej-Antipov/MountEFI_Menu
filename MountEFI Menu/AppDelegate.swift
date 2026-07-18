@@ -772,32 +772,70 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         }
     }
 
-
     @objc func toggleMount(_ sender: NSMenuItem) {
-        // Извлекаем строку ID диска напрямую из привязанного representedObject нажатого пункта
         guard let diskId = sender.representedObject as? String else { return }
         
         DispatchQueue.global(qos: .userInitiated).async {
             let disks = self.getEfiDisks()
             let password = self.getStoredPassword()
             
-            // Проверяем статус монтирования: либо из массива, либо через системную утилиту mount
             let mountOutput = self.runShell("/sbin/mount")
-            let isMounted = disks.first(where: { $0.id == diskId })?.isMounted ?? mountOutput.contains("/dev/\(diskId) ")
+            guard let disk = disks.first(where: { $0.id == diskId }) else { return }
+            let isMounted = disk.isMounted
             
-            let volumeName = disks.first(where: { $0.id == diskId })?.volumeName ?? "EFI"
+            // 1. ОЧИСТКА ИМЕНИ: Убираем пробелы и спецсимволы из названия модели
+            let safePhysName = disk.physName
+                .replacingOccurrences(of: " ", with: "_")
+                .replacingOccurrences(of: "[^A-Za-z0-9_-]", with: "", options: .regularExpression)
+            
+            // Формируем базовое наглядное имя с префиксом EFI (например, "EFI_SanDisk_Ultra")
+            let baseVolumeName = safePhysName.isEmpty ? "EFI_\(diskId)" : "EFI_\(safePhysName)"
+            
+            // Переменные для финального уникального имени
+            var uniqueVolumeName = baseVolumeName
+            var customMountPath = "/System/Volumes/Data/Volumes/\(uniqueVolumeName)"
+            
+            // 2. ЗАЩИТА ОТ ДУБЛИКАТОВ: Если диск еще НЕ смонтирован, проверяем занятость папки в /Volumes
+            if !isMounted {
+                var counter = 1
+                let fileManager = FileManager.default
+                
+                // Цикл крутится до тех пор, пока не найдет свободное имя (например, EFI_SanDisk_Ultra_1)
+                while fileManager.fileExists(atPath: customMountPath) {
+                    uniqueVolumeName = "\(baseVolumeName)_\(counter)"
+                    customMountPath = "/System/Volumes/Data/Volumes/\(uniqueVolumeName)"
+                    counter += 1
+                }
+            } else {
+                // Если диск УЖЕ смонтирован и мы его отключаем, нам нужно узнать, под каким именно именем он висит в системе.
+                // Вытаскиваем точную точку монтирования из системного вывода /sbin/mount
+                let lines = mountOutput.components(separatedBy: "\n")
+                for line in lines {
+                    if line.contains("/dev/\(diskId) on ") {
+                        // Строка выглядит как: "/dev/disk3s1 on /Volumes/EFI_SanDisk_Ultra (msdos...)"
+                        if let startRange = line.range(of: " on "),
+                           let endRange = line.range(of: " (") {
+                            let fullPath = line[startRange.upperBound..<endRange.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+                            customMountPath = fullPath
+                            uniqueVolumeName = fullPath.components(separatedBy: "/").last ?? baseVolumeName
+                            break
+                        }
+                    }
+                }
+            }
             
             if isMounted {
-                let fastCloseScript = "tell application \"Finder\" to if window \"\(volumeName)\" exists then close window \"\(volumeName)\""
+                // 3. ЗАКРЫВАЕМ ОКНО FINDER: Закрываем уникальное окно конкретно этого диска
+                let fastCloseScript = "tell application \"Finder\" to if window \"\(uniqueVolumeName)\" exists then close window \"\(uniqueVolumeName)\""
                 let closeTask = Process()
                 closeTask.launchPath = "/usr/bin/osascript"
                 closeTask.arguments = ["-e", fastCloseScript]
                 closeTask.launch()
                 closeTask.waitUntilExit()
                 
+                // 4. РАЗМОНТИРОВАНИЕ
                 let task = Process()
                 task.launchPath = "/bin/bash"
-                
                 if let pwd = password {
                     task.arguments = ["-c", "echo '\(pwd)' | sudo -S /usr/sbin/diskutil unmount \(diskId)"]
                 } else {
@@ -813,7 +851,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                     forced = true
                     let forceTask = Process()
                     forceTask.launchPath = "/bin/bash"
-                    
                     if let pwd = password {
                         forceTask.arguments = ["-c", "echo '\(pwd)' | sudo -S /usr/sbin/diskutil unmount force \(diskId)"]
                     } else {
@@ -836,21 +873,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                     self.asyncHotplugMonitor()
                 }
             } else {
+                // ИСПРАВЛЕНО: Переводим путь на классический /Volumes/ для беспрепятственного доступа diskutil
+                let standardMountPath = "/Volumes/\(uniqueVolumeName)"
+                
+                // 5. МОНТИРОВАНИЕ В УНИКАЛЬНУЮ ПАПКУ С ПРЕФИКСОМ EFI_
                 let task = Process()
                 task.launchPath = "/bin/bash"
                 
+                // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Создаем папку (mkdir) и монтируем в нее в рамках ОДНОГО bash-процесса с нужными правами
                 if let pwd = password {
-                    task.arguments = ["-c", "echo '\(pwd)' | sudo -S /usr/sbin/diskutil mount \(diskId)"]
+                    task.arguments = ["-c", "echo '\(pwd)' | sudo -S /bin/mkdir -p \(standardMountPath) && echo '\(pwd)' | sudo -S /usr/sbin/diskutil mount -mountPoint \(standardMountPath) \(diskId)"]
                 } else {
-                    task.arguments = ["-c", "osascript -e 'do shell script \"/usr/sbin/diskutil mount \(diskId)\" with administrator privileges'"]
+                    task.arguments = ["-c", "osascript -e 'do shell script \"/bin/mkdir -p \(standardMountPath) && /usr/sbin/diskutil mount -mountPoint \(standardMountPath) \(diskId)\" with administrator privileges'"]
                 }
                 task.launch()
                 task.waitUntilExit()
                 
-                let targetPath = "/Volumes/\(volumeName)"
+                // 6. ГАРАНТИРОВАННОЕ ОТКРЫТИЕ ОКНА FINDER ДЛЯ КАЖДОГО ДИСКА
                 let openTask = Process()
                 openTask.launchPath = "/usr/bin/open"
-                openTask.arguments = [FileManager.default.fileExists(atPath: targetPath) ? targetPath : "/Volumes/EFI"]
+                openTask.arguments = [standardMountPath]
                 openTask.launch()
                 
                 DispatchQueue.main.async {
@@ -860,6 +902,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                     } else {
                         let text = String(format: "mount_error".localized, diskId)
                         self.showNotification(title: "notif_title".localized, text: text)
+                        
+                        // Если монтирование сорвалось — подчищаем созданную пустую папку через bash
+                        let cleanTask = Process()
+                        cleanTask.launchPath = "/bin/bash"
+                        if let pwd = password {
+                            cleanTask.arguments = ["-c", "echo '\(pwd)' | sudo -S /bin/rmdir \(standardMountPath)"]
+                        } else {
+                            cleanTask.arguments = ["-c", "osascript -e 'do shell script \"/bin/rmdir \(standardMountPath)\" with administrator privileges'"]
+                        }
+                        cleanTask.launch()
                     }
                     self.needsRefresh = true
                     self.asyncHotplugMonitor()
@@ -867,6 +919,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             }
         }
     }
+
     @objc func forceQuitApp() {
         NSApplication.shared.terminate(self)
     }
