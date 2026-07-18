@@ -53,7 +53,8 @@ class LocalizationManager {
     // Главный словарь переводов (Ключ строки -> [Русский, Английский])
     func localizedString(_ key: String) -> String {
         let translations: [String: [AppLanguage: String]] = [
-            "eject_whole": [.russian: "Извлечь весь накопитель", .english: "Eject Whole Drive"],
+            "eject_tooltip": [.russian: "Извлечь весь накопитель", .english: "Eject whole drive"],
+            "eject_whole": [.russian: "!", .english: "!"],
             "eject_success_notif": [.russian: "Накопитель %@ успешно отключен и готов к безопасному извлечению.", .english: "Drive %@ has been successfully disconnected and is ready for safe removal."],
             "force_eject_title": [.russian: "Диск занят", .english: "Disk is Busy"],
             "force_eject_info": [.russian: "Некоторые разделы накопителя %@ используются другими программами. Отключить его принудительно?", .english: "Some partitions on drive %@ are currently in use by other applications. Force disconnection?"],
@@ -561,19 +562,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                         item.representedObject = disk.id
                         item.target = self
                         
-                        // НОВОЕ: Если EFI раздел смонтирован, создаем боковое подменю полного извлечения
-                        if disk.isMounted {
-                            let diskSubmenu = NSMenu()
-                            let ejectAllItem = NSMenuItem(
-                                title: "⏏️ \("eject_whole".localized)",
-                                action: #selector(self.ejectWholeDisk(_:)),
-                                keyEquivalent: ""
-                            )
-                            ejectAllItem.representedObject = disk.id
-                            ejectAllItem.target = self
-                            diskSubmenu.addItem(ejectAllItem)
-                            item.submenu = diskSubmenu
-                        }
+                        // ИСПРАВЛЕНО: В подменю выводится ТОЛЬКО значок, текст перенесен во всплывающую подсказку
+                        let diskSubmenu = NSMenu()
+                        let ejectAllItem = NSMenuItem(
+                            title: "⏏️", // Текст полностью убран, оставлен только значок извлечения
+                            action: #selector(self.ejectWholeDisk(_:)),
+                            keyEquivalent: ""
+                        )
+                        ejectAllItem.toolTip = "eject_tooltip".localized // ДОБАВЛЕНО: Всплывающая подсказка при наведении
+                        ejectAllItem.representedObject = disk.id
+                        ejectAllItem.target = self
+                        diskSubmenu.addItem(ejectAllItem)
+                        item.submenu = diskSubmenu
                         
                         self.statusMenu.addItem(item)
                     }
@@ -598,24 +598,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                         item.representedObject = disk.id
                         item.target = self
                         
-                        // НОВОЕ: Если EFI раздел смонтирован, создаем боковое подменю полного извлечения
-                        if disk.isMounted {
-                            let diskSubmenu = NSMenu()
-                            let ejectAllItem = NSMenuItem(
-                                title: "⏏️ \("eject_whole".localized)",
-                                action: #selector(self.ejectWholeDisk(_:)),
-                                keyEquivalent: ""
-                            )
-                            ejectAllItem.representedObject = disk.id
-                            ejectAllItem.target = self
-                            diskSubmenu.addItem(ejectAllItem)
-                            item.submenu = diskSubmenu
-                        }
+                        // ИСПРАВЛЕНО: В подменю выводится ТОЛЬКО значок, текст перенесен во всплывающую подсказку
+                        let diskSubmenu = NSMenu()
+                        let ejectAllItem = NSMenuItem(
+                            title: "⏏️", // Текст полностью убран, оставлен только значок извлечения
+                            action: #selector(self.ejectWholeDisk(_:)),
+                            keyEquivalent: ""
+                        )
+                        ejectAllItem.toolTip = "eject_tooltip".localized // ДОБАВЛЕНО: Всплывающая подсказка при наведении
+                        ejectAllItem.representedObject = disk.id
+                        ejectAllItem.target = self
+                        diskSubmenu.addItem(ejectAllItem)
+                        item.submenu = diskSubmenu
                         
                         self.statusMenu.addItem(item)
                     }
                 }
-
             }
             
             // =================================================================
