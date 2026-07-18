@@ -16,8 +16,8 @@
 <p>
   <img src="https://img.shields.io/badge/2.3%20Latest%20Release-8A2BE2" alt="Последний релиз 2.3">
   <img src="https://img.shields.io/badge/github-repo-swift?logo=github" alt="SWIFT">
-  <img src="https://img.shields.io/badge/Apple-MacOS-blue" alt="Platform"> alt="MacOS">
-  <img src="https://img.shields.io/badge/SWIFT-red" alt="License"> alt="MIT">
+  <img src="https://img.shields.io/badge/Apple-MacOS-blue" alt="MacOS">
+  <img src="https://img.shields.io/badge/SWIFT-red" alt="MIT">
 </p>
 
 <h4>
@@ -105,5 +105,5 @@ open MountEFI-Menu.xcodeproj
 <hr />
 
 <div align="center">
-  Создано с ❤️ для macOS сообщества • <a href="https://github.com">@ваше_имя</a>
+  Создано с ❤️ для macOS сообщества • <a href="https://github.com">@gosvamih</a>
 </div>
