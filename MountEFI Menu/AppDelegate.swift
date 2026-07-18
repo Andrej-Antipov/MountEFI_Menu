@@ -394,7 +394,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             
             if let disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, part) {
                 // СТРОГАЯ ЗАЩИТА: Безопасный пропуск диска, если он стирается или недоступен
-                guard let description = DADiskCopyDescription(disk) as? [String: Any] else { continue }
+                guard let _ = DADiskCopyDescription(disk) as? [String: Any] else { continue }
                 
                 if let wholeDisk = DADiskCopyWholeDisk(disk),
                    let wholeDesc = DADiskCopyDescription(wholeDisk) as? [String: Any] {
@@ -449,7 +449,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             let isMounted = mountOutput.contains("/dev/\(part) ")
             let size = "---"
             
-            // Нативно считываем уникальное имя тома
+            // Считываем уникальное имя тома
             var volumeName = "EFI"
             if let disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, part),
                let desc = DADiskCopyDescription(disk) as? [String: Any],
@@ -489,7 +489,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
     }
 
     @objc func mountCurrentSystemEFI(_ sender: NSMenuItem) {
-        // ИСПРАВЛЕНО: Напрямую и без промежуточных пустышек перенаправляем оригинальный пункт меню
+        // Перенаправляем оригинальный пункт меню
         self.toggleMount(sender)
     }
 
@@ -742,7 +742,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             try? FileManager.default.removeItem(atPath: confPath)
             showNotification(title: "notif_title".localized, text: "pass_removed_notif".localized)
             
-            // ИСПРАВЛЕНО: Принудительно обновляем меню на главном потоке, чтобы кнопка мгновенно сменилась на "Задать пароль"
+            // Принудительно обновляем меню на главном потоке, чтобы кнопка мгновенно сменилась на "Задать пароль"
             DispatchQueue.main.async {
                 self.needsRefresh = true
                 self.asyncHotplugMonitor()
@@ -789,7 +789,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 }
             }
             
-            // ИСПРАВЛЕНО: Принудительно обновляем меню на главном потоке после закрытия окна ввода
+            // Принудительно обновляем меню на главном потоке после закрытия окна ввода
             DispatchQueue.main.async {
                 self.needsRefresh = true
                 self.asyncHotplugMonitor()
@@ -898,7 +898,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                     self.asyncHotplugMonitor()
                 }
             } else {
-                // ИСПРАВЛЕНО: Переводим путь на классический /Volumes/ для беспрепятственного доступа diskutil
+                // Переводим путь на классический /Volumes/ для беспрепятственного доступа diskutil
                 let standardMountPath = "/Volumes/\(uniqueVolumeName)"
                 
                 // 5. МОНТИРОВАНИЕ В УНИКАЛЬНУЮ ПАПКУ С ПРЕФИКСОМ EFI_
@@ -914,7 +914,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 task.launch()
                 task.waitUntilExit()
                 
-                // 6. ГАРАНТИРОВАННОЕ ОТКРЫТИЕ ОКНА FINDER ДЛЯ КАЖДОГО ДИСКА
+                // 6. ОТКРЫТИЕ ОКНА FINDER ДЛЯ КАЖДОГО ДИСКА
                 let openTask = Process()
                 openTask.launchPath = "/usr/bin/open"
                 openTask.arguments = [standardMountPath]
@@ -1049,20 +1049,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         self.refreshMenu() // Перерисовываем интерфейс с новыми строками "на лету"
     }
 
-    func simulateEscapeKey() {
-        // Создаем событие нажатия клавиши Esc (код 53)
-        if let eventDown = CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: true),
-           let eventUp = CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: false) {
-            // Отправляем сигналы напрямую в системную очередь ввода
-            eventDown.post(tap: .cghidEventTap)
-            eventUp.post(tap: .cghidEventTap)
-        }
-    }
-    
     @objc func manualUpdateCheck() {
         AppUpdater.checkForUpdates(silent: false)
     }
-} // <--- ЗДЕСЬ ОКОНЧАТЕЛЬНО ЗАКРЫВАЕТСЯ КЛАСС APPDELEGATE
+} // <--- ЗДЕСЬ ЗАКРЫВАЕТСЯ КЛАСС APPDELEGATE
 
 // =================================================================
 // КЛАСС АВТООБНОВЛЕНИЯ
