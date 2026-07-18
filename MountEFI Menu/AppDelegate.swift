@@ -287,10 +287,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             AppUpdater.checkForUpdates(silent: true)
         }
         
-        // Запускаем таймер проверки портов (интервал 3 секунды)
-        Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+        // =================================================================
+        // ИСПРАВЛЕНО ДЛЯ АКТУАЛЬНОГО SWIFT SDK: Используем новое имя RunLoop.Mode.common
+        // =================================================================
+        let hotplugTimer = Timer(timeInterval: 3.0, repeats: true) { [weak self] _ in
             self?.asyncHotplugMonitor()
         }
+        RunLoop.current.add(hotplugTimer, forMode: RunLoop.Mode.common)
+        // =================================================================
         
         DispatchQueue.main.async {
             NSApplication.shared.windows.forEach { window in
@@ -301,13 +305,41 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         }
     }
 
+    // Переменная-флаг, которая защитит от бесконечного цикла автооткрытия
+    var isAutoReopening = false
+
     func menuWillOpen(_ menu: NSMenu) {
         menuIsOpen = true
     }
 
     func menuDidClose(_ menu: NSMenu) {
         menuIsOpen = false
-    }
+        
+        // Если переоткрытие уже идет, сбрасываем флаг и выходим
+        if isAutoReopening {
+            isAutoReopening = false
+            return
+        }
+        
+        // Проверяем: если меню закрылось из-за того, что фоновый монитор затребовал обновление
+        // (то есть кэш дисков не совпадает с реальностью)
+        // ИСПРАВЛЕНО: Считываем актуальный массив дисков и обновляем меню БЕЗ задержек,
+        // сразу возвращая обновленное окно курьеру на экран
+        let actualDisks = self.getEfiDisks()
+        let actualIds = Set(actualDisks.map { $0.id })
+        
+        if actualIds != self.knownDiskIds || self.needsRefresh {
+            self.lastDisksCount = actualDisks.count
+            self.knownDiskIds = actualIds
+            
+            // 1. Чисто пересобираем элементы на свободном потоке UI
+            self.updateMenuOnMainThread(with: actualDisks)
+            
+            // 2. Имитируем клик по иконке для автоматического раскрытия обновленного списка
+            self.isAutoReopening = true
+            self.statusItem.button?.performClick(nil)
+                }
+            }
 
     func showNotification(title: String, text: String) {
         let content = UNMutableNotificationContent()
@@ -462,13 +494,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
     }
 
     @objc func asyncHotplugMonitor() {
-        if menuIsOpen { return }
-        
         DispatchQueue.global(qos: .userInitiated).async {
             let disks = self.getEfiDisks()
             let currentCount = disks.count
             
-            // ИСПРАВЛЕНО: Уходим на главный поток асинхронно (async), полностью защищая UI от фризов при форматировании
             DispatchQueue.main.async {
                 var mountStatusChanged = false
                 
@@ -482,22 +511,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                     }
                 }
                 
+                // ЛОГ ТАЙМЕРА: Выводим статус каждые 3 секунды в консоль
+                if self.menuIsOpen {
+ //                   print("[Monitor] ТАКТ: Меню ОТКРЫТО. Найдено дисков: \(currentCount) (Прошлый раз: \(self.lastDisksCount)). Статус монтирования изменился: \(mountStatusChanged)")
+                }
+                
                 for disk in disks {
                     if (disk.isUsb || disk.isThunderbolt) && !self.knownDiskIds.contains(disk.id) {
                         let typeStr = disk.isThunderbolt ? "Thunderbolt" : "USB"
-                        
-                        // ИСПРАВЛЕНО ДЛЯ ЛОКАЛИЗАЦИИ: Динамически собираем строку по правилам выбранного языка
                         let localizedText = String(format: "disk_connected".localized, typeStr, disk.id, disk.physName)
-                        
-                        self.showNotification(
-                            title: "notif_title".localized,
-                            text: localizedText
-                        )
+                        self.showNotification(title: "notif_title".localized, text: localizedText)
                     }
                 }
-
+                
+                // Фиксируем изменение количества накопителей на портах
+                if currentCount != self.lastDisksCount {
+ //                   print("[Monitor] ИЗМЕНЕНИЕ: Количество дисков изменилось! Взводим принудительный рефреш.")
+                    self.needsRefresh = true
+                }
                 
                 if currentCount != self.lastDisksCount || mountStatusChanged || self.needsRefresh {
+//                    print("[Monitor] ДЕЙСТВИЕ: Отправляем запрос на перерисовку меню...")
                     self.lastDisksCount = currentCount
                     self.knownDiskIds = Set(disks.map { $0.id })
                     self.updateMenuOnMainThread(with: disks)
@@ -514,6 +548,48 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
     }
     func updateMenuOnMainThread(with disks: [EfiDisk]) {
         DispatchQueue.main.async {
+//            print("[UI-Menu] Вызван метод перерисовки. menuIsOpen = \(self.menuIsOpen), needsRefresh = \(self.needsRefresh)")
+            
+            // =================================================================
+            // СЦЕНАРИЙ А: Точечное обновление строк
+            // =================================================================
+            if self.menuIsOpen && !self.needsRefresh {
+//                print("[UI-Menu] ЗАПУЩЕН СЦЕНАРИЙ А: Точечное обновление кружков и стрелочек на лету...")
+                for disk in disks {
+                    if let item = self.statusMenu.items.first(where: { ($0.representedObject as? String) == disk.id }) {
+                        let status = disk.isMounted ? "🟢" : "🔴"
+                        let vName = disk.volumeName.uppercased()
+                        let displayVolume = (vName == "EFI" || vName == "ESP" || vName.isEmpty) ? "" : "\"\(disk.volumeName)\" "
+                        
+                        let iconStr = disk.isThunderbolt ? "⚡️" : (disk.isUsb ? "🔌" : "")
+                        let newTitle = "\(status) \(iconStr) \(disk.id) [\(disk.type)] \(displayVolume)(\(disk.physName))"
+                        
+                        if item.title != newTitle {
+                            item.title = newTitle
+                        }
+                        
+                        if disk.isMounted && item.submenu == nil {
+                            let diskSubmenu = NSMenu()
+                            let ejectAllItem = NSMenuItem(title: "⏏️", action: #selector(self.ejectWholeDisk(_:)), keyEquivalent: "")
+                            ejectAllItem.toolTip = "eject_tooltip".localized
+                            ejectAllItem.representedObject = disk.id
+                            ejectAllItem.target = self
+                            diskSubmenu.addItem(ejectAllItem)
+                            item.submenu = diskSubmenu
+                        } else if !disk.isMounted && item.submenu != nil {
+                            item.submenu = nil
+                        }
+                    }
+                }
+                self.needsRefresh = false
+//                print("[UI-Menu] СЦЕНАРИЙ А успешно завершен.")
+                return
+            }
+            
+            // =================================================================
+            // СЦЕНАРИЙ Б: Полная монолитная пересборка меню
+            // =================================================================
+//            print("[UI-Menu] ЗАПУЩЕН СЦЕНАРИЙ Б: Полная очистка и пересборка всего меню с нуля!")
             self.statusMenu.removeAllItems()
             self.activeDiskItems.removeAll()
             self.needsRefresh = false
@@ -532,7 +608,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                     let header = NSMenuItem(title: "internal_disks".localized, action: nil, keyEquivalent: "")
                     header.isEnabled = false
                     self.statusMenu.addItem(header)
-                    
                     for disk in internalDisks {
                         let status = disk.isMounted ? "🟢" : "🔴"
                         let title = "\(status) \(disk.id) [\(disk.type)] (\(disk.physName))"
@@ -545,31 +620,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 
                 // 2. СЕКЦИЯ: Внешние Thunderbolt диски
                 if !thunderboltDisks.isEmpty {
-                    if !internalDisks.isEmpty {
-                        self.statusMenu.addItem(NSMenuItem.separator())
-                    }
+                    if !internalDisks.isEmpty { self.statusMenu.addItem(NSMenuItem.separator()) }
                     let header = NSMenuItem(title: "thunderbolt_disks".localized, action: nil, keyEquivalent: "")
                     header.isEnabled = false
                     self.statusMenu.addItem(header)
-                    
                     for disk in thunderboltDisks {
                         let status = disk.isMounted ? "🟢" : "🔴"
                         let vName = disk.volumeName.uppercased()
                         let displayVolume = (vName == "EFI" || vName == "ESP" || vName.isEmpty) ? "" : "\"\(disk.volumeName)\" "
-                        
                         let title = "\(status) ⚡️ \(disk.id) [\(disk.type)] \(displayVolume)(\(disk.physName))"
                         let item = NSMenuItem(title: title, action: #selector(self.toggleMount(_:)), keyEquivalent: "")
                         item.representedObject = disk.id
                         item.target = self
                         
-                        // ИСПРАВЛЕНО: В подменю выводится ТОЛЬКО значок, текст перенесен во всплывающую подсказку
                         let diskSubmenu = NSMenu()
-                        let ejectAllItem = NSMenuItem(
-                            title: "⏏️", // Текст полностью убран, оставлен только значок извлечения
-                            action: #selector(self.ejectWholeDisk(_:)),
-                            keyEquivalent: ""
-                        )
-                        ejectAllItem.toolTip = "eject_tooltip".localized // ДОБАВЛЕНО: Всплывающая подсказка при наведении
+                        let ejectAllItem = NSMenuItem(title: "⏏️", action: #selector(self.ejectWholeDisk(_:)), keyEquivalent: "")
+                        ejectAllItem.toolTip = "eject_tooltip".localized
                         ejectAllItem.representedObject = disk.id
                         ejectAllItem.target = self
                         diskSubmenu.addItem(ejectAllItem)
@@ -581,31 +647,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 
                 // 3. СЕКЦИЯ: Внешние USB накопители
                 if !usbDisks.isEmpty {
-                    if !internalDisks.isEmpty || !thunderboltDisks.isEmpty {
-                        self.statusMenu.addItem(NSMenuItem.separator())
-                    }
+                    if !internalDisks.isEmpty || !thunderboltDisks.isEmpty { self.statusMenu.addItem(NSMenuItem.separator()) }
                     let header = NSMenuItem(title: "usb_disks".localized, action: nil, keyEquivalent: "")
                     header.isEnabled = false
                     self.statusMenu.addItem(header)
-                    
                     for disk in usbDisks {
                         let status = disk.isMounted ? "🟢" : "🔴"
                         let vName = disk.volumeName.uppercased()
                         let displayVolume = (vName == "EFI" || vName == "ESP" || vName.isEmpty) ? "" : "\"\(disk.volumeName)\" "
-                        
                         let title = "\(status) 🔌 \(disk.id) [\(disk.type)] \(displayVolume)(\(disk.physName))"
                         let item = NSMenuItem(title: title, action: #selector(self.toggleMount(_:)), keyEquivalent: "")
                         item.representedObject = disk.id
                         item.target = self
                         
-                        // ИСПРАВЛЕНО: В подменю выводится ТОЛЬКО значок, текст перенесен во всплывающую подсказку
                         let diskSubmenu = NSMenu()
-                        let ejectAllItem = NSMenuItem(
-                            title: "⏏️", // Текст полностью убран, оставлен только значок извлечения
-                            action: #selector(self.ejectWholeDisk(_:)),
-                            keyEquivalent: ""
-                        )
-                        ejectAllItem.toolTip = "eject_tooltip".localized // ДОБАВЛЕНО: Всплывающая подсказка при наведении
+                        let ejectAllItem = NSMenuItem(title: "⏏️", action: #selector(self.ejectWholeDisk(_:)), keyEquivalent: "")
+                        ejectAllItem.toolTip = "eject_tooltip".localized
                         ejectAllItem.representedObject = disk.id
                         ejectAllItem.target = self
                         diskSubmenu.addItem(ejectAllItem)
@@ -617,87 +674,57 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             }
             
             // =================================================================
-            // ПОДВАЛ МЕНЮ (Формируется всегда)
+            // ПОДВАЛ МЕНЮ И НАСТРОЙКИ
             // =================================================================
             self.statusMenu.addItem(NSMenuItem.separator())
-            
-            // 1. Кнопка быстрого EFI текущей системы
             if let bootEFI = self.systemEFIDisk {
                 let systemDiskInfo = disks.first { $0.id == bootEFI }
                 let isMounted = systemDiskInfo?.isMounted ?? false
-                
-                // Динамически переводим глагол "Подключить / Размонтировать"
                 let actionKey = isMounted ? "unmount_current_efi" : "mount_current_efi"
-                
-                let bootEfiItem = NSMenuItem(
-                    title: "💻 \(actionKey.localized)",
-                    action: #selector(self.mountCurrentSystemEFI(_:)),
-                    keyEquivalent: "e"
-                )
+                let bootEfiItem = NSMenuItem(title: "💻 \(actionKey.localized)", action: #selector(self.mountCurrentSystemEFI(_:)), keyEquivalent: "e")
                 bootEfiItem.representedObject = bootEFI
                 bootEfiItem.target = self
-                
                 self.statusMenu.addItem(bootEfiItem)
                 self.statusMenu.addItem(NSMenuItem.separator())
             }
             
-            // 2. Создаем главный пункт «⚙️ Настройки» с боковым подменю
             let settingsItem = NSMenuItem(title: "settings".localized, action: nil, keyEquivalent: "")
             let submenu = NSMenu()
-            
             let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
             let versionItem = NSMenuItem(title: "\("app_version".localized)\(currentVersion)", action: nil, keyEquivalent: "")
             versionItem.isEnabled = false
             submenu.addItem(versionItem)
-            
             submenu.addItem(NSMenuItem.separator())
-            
-            // Пароль администратора
             let hasPassword = FileManager.default.fileExists(atPath: self.confPath)
             let passTitle = hasPassword ? "remove_pass".localized : "set_pass".localized
             let passItem = NSMenuItem(title: passTitle, action: #selector(self.handlePasswordButton(_:)), keyEquivalent: "")
             passItem.target = self
             submenu.addItem(passItem)
-            
             submenu.addItem(NSMenuItem.separator())
-            
-            // --- НОВОЕ: ВЛОЖЕННОЕ МЕНЮ ВЫБОРА ЯЗЫКА ---
             let langMenuItem = NSMenuItem(title: "select_lang".localized, action: nil, keyEquivalent: "")
             let langSubmenu = NSMenu()
-            
-            // Пункт "Русский"
             let ruItem = NSMenuItem(title: "Русский", action: #selector(self.changeLanguageToRussian), keyEquivalent: "")
             ruItem.target = self
-            ruItem.state = LocalizationManager.shared.currentLanguage == .russian ? .on : .off // Ставим галочку
+            ruItem.state = LocalizationManager.shared.currentLanguage == .russian ? .on : .off
             langSubmenu.addItem(ruItem)
-            
-            // Пункт "English"
             let enItem = NSMenuItem(title: "English", action: #selector(self.changeLanguageToEnglish), keyEquivalent: "")
             enItem.target = self
-            enItem.state = LocalizationManager.shared.currentLanguage == .english ? .on : .off // Ставим галочку
+            enItem.state = LocalizationManager.shared.currentLanguage == .english ? .on : .off
             langSubmenu.addItem(enItem)
-            
             langMenuItem.submenu = langSubmenu
             submenu.addItem(langMenuItem)
-            // ------------------------------------------
-            
             submenu.addItem(NSMenuItem.separator())
-            
-            // Проверить обновления
             let updateItem = NSMenuItem(title: "check_updates".localized, action: #selector(self.manualUpdateCheck), keyEquivalent: "")
             updateItem.target = self
             submenu.addItem(updateItem)
-            
             settingsItem.submenu = submenu
             self.statusMenu.addItem(settingsItem)
-            
-            // 3. Кнопка Выхода
             self.statusMenu.addItem(NSMenuItem.separator())
             let quitItem = NSMenuItem(title: "quit".localized, action: #selector(self.forceQuitApp), keyEquivalent: "q")
             quitItem.target = self
             self.statusMenu.addItem(quitItem)
         }
-    }
+    } // <--- КОНЕЦ МЕТОДА UPDATEMENUONMAINTHREAD
 
     func getStoredPassword() -> String? {
         if let dict = NSDictionary(contentsOfFile: confPath),
@@ -1011,7 +1038,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             }
         }
     }
-
     
     @objc func changeLanguageToRussian() {
         LocalizationManager.shared.setLanguage(.russian)
@@ -1023,6 +1049,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         self.refreshMenu() // Перерисовываем интерфейс с новыми строками "на лету"
     }
 
+    func simulateEscapeKey() {
+        // Создаем событие нажатия клавиши Esc (код 53)
+        if let eventDown = CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: true),
+           let eventUp = CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: false) {
+            // Отправляем сигналы напрямую в системную очередь ввода
+            eventDown.post(tap: .cghidEventTap)
+            eventUp.post(tap: .cghidEventTap)
+        }
+    }
     
     @objc func manualUpdateCheck() {
         AppUpdater.checkForUpdates(silent: false)
