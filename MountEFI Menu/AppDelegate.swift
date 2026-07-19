@@ -54,7 +54,6 @@ class LocalizationManager {
     func localizedString(_ key: String) -> String {
         let translations: [String: [AppLanguage: String]] = [
             "eject_tooltip": [.russian: "Извлечь весь накопитель", .english: "Eject whole drive"],
-            "eject_whole": [.russian: "!", .english: "!"],
             "eject_success_notif": [.russian: "Накопитель %@ успешно отключен и готов к безопасному извлечению.", .english: "Drive %@ has been successfully disconnected and is ready for safe removal."],
             "force_eject_title": [.russian: "Диск занят", .english: "Disk is Busy"],
             "force_eject_info": [.russian: "Некоторые разделы накопителя %@ используются другими программами. Отключить его принудительно?", .english: "Some partitions on drive %@ are currently in use by other applications. Force disconnection?"],
@@ -80,6 +79,7 @@ class LocalizationManager {
             "remove_pass": [.russian: "🔒 Удалить пароль администратора", .english: "🔒 Remove Administrator Password"],
             "check_updates": [.russian: "🔄 Проверить обновления...", .english: "🔄 Check for Updates..."],
             "select_lang": [.russian: "🌐 Выбор языка / Language", .english: "🌐 Language / Выбор языка"],
+            "launch_at_login": [.russian: "🚀 Запускать при старте Mac", .english: "🚀 Launch at Login"],
             
             // Окна алертов и уведомлений
             "pass_title": [.russian: "Настройка пароля", .english: "Password Setup"],
@@ -695,6 +695,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             versionItem.isEnabled = false
             submenu.addItem(versionItem)
             submenu.addItem(NSMenuItem.separator())
+            let autostartItem = NSMenuItem(title: "launch_at_login".localized, action: #selector(self.toggleAutostart(_:)), keyEquivalent: "")
+            autostartItem.target = self
+            // Устанавливаем галочку, если автозапуск уже включен в системе
+            autostartItem.state = AutoStartManager.shared.isEnabled ? .on : .off
+            submenu.addItem(autostartItem)
+            submenu.addItem(NSMenuItem.separator())
             let hasPassword = FileManager.default.fileExists(atPath: self.confPath)
             let passTitle = hasPassword ? "remove_pass".localized : "set_pass".localized
             let passItem = NSMenuItem(title: passTitle, action: #selector(self.handlePasswordButton(_:)), keyEquivalent: "")
@@ -1037,6 +1043,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
                 }
             }
         }
+    }
+    
+    @objc private func toggleAutostart(_ sender: NSMenuItem) {
+        // Меняем состояние на противоположное
+        let newState = sender.state == .on ? false : true
+        
+        // Передаем значение в наш менеджер (он сам разберется с версией macOS)
+        AutoStartManager.shared.setEnabled(newState)
+        
+        // Визуально переключаем галочку в меню
+        sender.state = newState ? .on : .off
     }
     
     @objc func changeLanguageToRussian() {
