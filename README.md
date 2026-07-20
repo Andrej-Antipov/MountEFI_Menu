@@ -47,6 +47,7 @@
 - 🔍 **Auto-Scanning:** Automatically updates the drive list whenever external USB drives are connected or disconnected.
 - 📁 **Quick Open:** Automatically reveals the mounted EFI partition in Finder right after a successful mount.
 - 🔒 **Native Security:** Securely requests `sudo` privileges using standard macOS authorization dialogs.
+- 🚀 **Autostart:**  Easily enable or disable at startup via the checkbox in the settings menu.
 
 ---
 
