@@ -74,7 +74,7 @@ class LocalizationManager {
             "quit": [.russian: "Выйти", .english: "Quit"],
             
             // Подменю настроек
-            "app_version": [.russian: "Версия приложения: v", .english: "App Version: v"],
+            "app_version": [.russian: "Версия приложения: ", .english: "App Version: "],
             "set_pass": [.russian: "🔑 Задать пароль администратора", .english: "🔑 Set Administrator Password"],
             "remove_pass": [.russian: "🔒 Удалить пароль администратора", .english: "🔒 Remove Administrator Password"],
             "check_updates": [.russian: "🔄 Проверить обновления...", .english: "🔄 Check for Updates..."],
@@ -102,11 +102,11 @@ class LocalizationManager {
             
             // Окна апдейтера
             "upd_title": [.russian: "Доступно обновление", .english: "Update Available"],
-            "upd_info": [.russian: "Доступна новая версия MountEFI Menu: v%@. Желаете обновиться?", .english: "A new version of MountEFI Menu is available: v%@. Would you like to update?"],
+            "upd_info": [.russian: "Доступна новая версия MountEFI Menu: %@. Желаете обновиться?", .english: "A new version of MountEFI Menu is available: %@. Would you like to update?"],
             "upd_download": [.russian: "Скачать и обновить", .english: "Download and Update"],
             "upd_later": [.russian: "Позже", .english: "Later"],
             "upd_not_needed_title": [.russian: "Обновление не требуется", .english: "No Update Needed"],
-            "upd_not_needed_info": [.russian: "У вас установлена самая свежая версия v%@.", .english: "You have the latest version v%@ installed."]
+            "upd_not_needed_info": [.russian: "У вас установлена самая свежая версия %@.", .english: "You have the latest version %@ installed."]
             
         ]
         
